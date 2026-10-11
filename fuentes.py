@@ -26,6 +26,34 @@ MEDIOS = [
 ]
 
 
+# Prensa económica especializada (pestaña Economía). Se muestra en su propia columna.
+MEDIOS_ECONOMICOS = [
+    {"nombre": "Diario Financiero", "dominio": "df.cl"},
+    {"nombre": "Pulso (La Tercera)", "dominio": "latercera.com/pulso"},
+    {"nombre": "El Mostrador Mercados", "dominio": "elmostrador.cl/mercados"},
+    {"nombre": "Bloomberg Línea", "dominio": "bloomberglinea.com"},
+]
+
+# Palabras con que se buscan noticias económicas en los medios generales.
+CONSULTA_ECONOMIA = (
+    '(economía OR inflación OR IPC OR dólar OR cobre OR "Banco Central" OR empleo '
+    'OR desempleo OR impuestos OR pensiones OR exportaciones OR combustibles OR sueldo)'
+)
+
+# Indicadores que se muestran arriba de la pestaña Economía (fuente: mindicador.cl).
+# código de mindicador.cl: (nombre a mostrar, formato)
+INDICADORES = {
+    "dolar": ("Dólar", "$"),
+    "euro": ("Euro", "$"),
+    "uf": ("UF", "$"),
+    "utm": ("UTM", "$"),
+    "ipc": ("IPC (mensual)", "%"),
+    "tpm": ("Tasa de política monetaria", "%"),
+    "libra_cobre": ("Cobre (US$/libra)", "US$"),
+    "tasa_desempleo": ("Desempleo", "%"),
+}
+
+
 # Medios internacionales en español: se usan para ver cómo se cuenta un tema chileno desde fuera.
 MEDIOS_INTERNACIONALES = [
     {"nombre": "BBC Mundo", "dominio": "bbc.com"},

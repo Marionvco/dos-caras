@@ -19,14 +19,30 @@ import urllib.request
 import feedparser
 import streamlit as st
 
-from fuentes import ACTORES, AGENCIAS, CONFLICTOS, MEDIOS, MEDIOS_INTERNACIONALES, PAISES
+from fuentes import (
+    ACTORES,
+    AGENCIAS,
+    CONFLICTOS,
+    CONSULTA_ECONOMIA,
+    INDICADORES,
+    MEDIOS,
+    MEDIOS_ECONOMICOS,
+    MEDIOS_INTERNACIONALES,
+    PAISES,
+)
 
 # Modelos gratuitos de Gemini, en orden de preferencia (si uno está saturado, prueba el siguiente)
 MODELOS_GEMINI = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 MODELO_CLAUDE = "claude-sonnet-5-5"  # opción pagada
 AGENTE = "Mozilla/5.0 (compatible; DosCaras/0.1)"
 ORDEN = ["izquierda", "centro", "derecha"]
-ETIQUETAS = {"izquierda": "⬅️ Izquierda", "centro": "⏺️ Centro", "derecha": "➡️ Derecha"}
+ETIQUETAS = {
+    "izquierda": "⬅️ Izquierda",
+    "centro": "⏺️ Centro",
+    "derecha": "➡️ Derecha",
+    "especializada": "📊 Prensa económica",
+}
+UNA_HORA = 60 * 60
 TRES_HORAS = 3 * 60 * 60
 
 st.set_page_config(page_title="Dos Caras", page_icon="⚖️", layout="wide")
@@ -117,6 +133,65 @@ def traer_titulares(texto_busqueda, dias, max_por_medio):
                 }
             )
     return noticias
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def traer_economia(dias, max_por_medio):
+    """Noticias económicas: medios generales (con su tendencia) + prensa económica especializada."""
+    noticias = traer_titulares(CONSULTA_ECONOMIA, dias, max_por_medio)
+    vistos = {n["titulo"] for n in noticias}
+    for medio in MEDIOS_ECONOMICOS:
+        consulta = f"site:{medio['dominio']} {filtro_fecha(dias)}"
+        feed = feedparser.parse(url_google_news(consulta), agent=AGENTE)
+        for entrada in feed.entries[:max_por_medio]:
+            titulo = limpiar_titulo(entrada.get("title", ""))
+            if not titulo or titulo in vistos:
+                continue
+            vistos.add(titulo)
+            noticias.append(
+                {
+                    "id": len(noticias),
+                    "medio": medio["nombre"],
+                    "tendencia": "especializada",
+                    "titulo": titulo,
+                    "link": entrada.get("link", ""),
+                }
+            )
+    return noticias
+
+
+@st.cache_data(ttl=UNA_HORA, show_spinner=False)
+def traer_indicadores():
+    """Indicadores económicos de Chile desde mindicador.cl (gratis, sin clave)."""
+    datos = leer_json_web("https://mindicador.cl/api")
+    salida = []
+    for codigo, (nombre, formato) in INDICADORES.items():
+        dato = datos.get(codigo)
+        if not isinstance(dato, dict) or dato.get("valor") is None:
+            continue
+        anterior = None
+        if codigo in ("dolar", "euro", "libra_cobre"):  # para mostrar la variación del día
+            serie = leer_json_web(f"https://mindicador.cl/api/{codigo}").get("serie", [])
+            if len(serie) > 1:
+                anterior = serie[1].get("valor")
+        salida.append(
+            {
+                "nombre": nombre,
+                "formato": formato,
+                "valor": dato["valor"],
+                "anterior": anterior,
+                "fecha": (dato.get("fecha") or "")[:10],
+            }
+        )
+    return salida
+
+
+def formatear_valor(valor, formato):
+    if formato == "%":
+        return f"{valor:.1f}%".replace(".", ",")
+    if formato == "US$":
+        return f"US$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
@@ -347,13 +422,23 @@ TEXTO: {texto}"""
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def agrupar_temas(noticias, n_temas):
+def agrupar_temas(noticias, n_temas, enfoque="general"):
+    if enfoque == "economia":
+        criterio = (
+            "Considera SOLO temas ECONÓMICOS: inflación, tasas, dólar, cobre, empleo, sueldos, impuestos, "
+            "pensiones, comercio exterior, empresas, combustibles, costo de la vida. Ignora todo lo demás. "
+            "La 'especializada' cuenta como una fuente distinta de las tres tendencias."
+        )
+    else:
+        criterio = (
+            "Prioriza temas de interés público (política, economía, sociedad, seguridad, salud, "
+            "educación). Ignora deportes, farándula, horóscopo y avisos."
+        )
     prompt = f"""Eres un editor de noticias neutral. Abajo hay titulares de medios chilenos
 (formato: id | tendencia del medio | medio | titular).
 
 Identifica hasta {n_temas} HECHOS o TEMAS concretos que hayan sido cubiertos por medios de al menos
-DOS tendencias distintas. Prioriza temas de interés público (política, economía, sociedad, seguridad,
-salud, educación). Ignora deportes, farándula, horóscopo y avisos. Cada titular va en un solo tema.
+DOS tendencias distintas. {criterio} Cada titular va en un solo tema.
 
 Responde SOLO con JSON con esta forma:
 {{"temas": [{{"tema": "nombre corto y neutral del tema", "ids": [1, 5, 9]}}]}}
@@ -364,7 +449,19 @@ TITULARES:
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def analizar_tema(tema, noticias):
+def analizar_tema(tema, noticias, enfoque="general"):
+    extra_economia = ""
+    if enfoque == "economia":
+        extra_economia = """
+
+Este es un tema ECONÓMICO. Además de lo anterior, agrega al JSON:
+  "enfoques" también con la clave "especializada": cómo lo presenta la prensa económica.
+  "bolsillo": {
+    "personas": "qué significa para una familia común, en lenguaje muy simple",
+    "pymes": "qué significa para una pequeña o mediana empresa",
+    "respaldo": "Lo dicen los titulares | Posible, requiere verificación"
+  }
+No inventes cifras: si los titulares no dan números, no los pongas."""
     prompt = f"""Eres un analista de medios riguroso y neutral. Tema: "{tema}".
 Estos son titulares sobre el tema, de medios con distinta tendencia
 (formato: id | tendencia del medio | medio | titular):
@@ -402,8 +499,8 @@ Responde SOLO con JSON con esta forma:
 En "paises" pon SOLO los países distintos de Chile que estén directamente involucrados en el tema
 (por ejemplo, un conflicto o acuerdo con ese país, o declaraciones de su gobierno o embajador).
 Usa solo estos códigos: {", ".join(f"{c} ({p['nombre']})" for c, p in PAISES.items())}.
-Si el tema es solo nacional, deja "paises" como lista vacía []."""
-    return llamar_ia(prompt, 3000)
+Si el tema es solo nacional, deja "paises" como lista vacía [].{extra_economia}"""
+    return llamar_ia(prompt, 3500)
 
 
 def lista_simple(noticias):
@@ -691,7 +788,8 @@ def mostrar_analisis(tema, noticias, analisis, clave_ui="0", periodo=7):
     st.write(seguro(analisis.get("resumen_neutral", "")))
 
     enfoques = analisis.get("enfoques", {})
-    for col, tendencia in zip(st.columns(3), ORDEN):
+    tendencias = ORDEN + (["especializada"] if any(n["tendencia"] == "especializada" for n in noticias) else [])
+    for col, tendencia in zip(st.columns(len(tendencias)), tendencias):
         with col:
             st.markdown(f"#### {ETIQUETAS[tendencia]}")
             st.caption(seguro(enfoques.get(tendencia, "")))
@@ -721,6 +819,17 @@ def mostrar_analisis(tema, noticias, analisis, clave_ui="0", periodo=7):
             ],
             hide_index=True,
         )
+
+    bolsillo = analisis.get("bolsillo")
+    if isinstance(bolsillo, dict) and (bolsillo.get("personas") or bolsillo.get("pymes")):
+        st.markdown("**💵 En tu bolsillo**")
+        b1, b2 = st.columns(2)
+        with b1:
+            st.markdown(f"**Para las personas:** {seguro(bolsillo.get('personas', ''))}")
+        with b2:
+            st.markdown(f"**Para las pymes:** {seguro(bolsillo.get('pymes', ''))}")
+        if bolsillo.get("respaldo"):
+            st.caption(f"Respaldo: {seguro(bolsillo['respaldo'])}")
 
     lista_puntos("❓ Preguntas abiertas", analisis.get("preguntas_abiertas", []))
     mostrar_extras(tema, noticias, analisis, clave_ui, periodo)
@@ -767,6 +876,8 @@ with st.sidebar:
     with st.expander("Medios revisados y su tendencia"):
         for m in MEDIOS:
             st.write(f"{ETIQUETAS[m['tendencia']]} — {m['nombre']}")
+        for m in MEDIOS_ECONOMICOS:
+            st.write(f"{ETIQUETAS['especializada']} — {m['nombre']}")
         st.caption("Clasificación inicial, editable en fuentes.py.")
 
 def ejecutar_geo(conflicto, dias_g, clave_ui, min_actores=2):
@@ -840,8 +951,8 @@ def buscar_en_mundo(texto, rango_busqueda):
     ejecutar_geo(tema, rango_busqueda, "mundo_" + texto, min_actores=0)
 
 
-tab_hoy, tab_buscar, tab_geo = st.tabs(
-    ["📰 Temas del día", "🔍 Buscar una noticia", "🌐 Geopolítica"]
+tab_hoy, tab_eco, tab_buscar, tab_geo = st.tabs(
+    ["📰 Temas del día", "💰 Economía", "🔍 Buscar una noticia", "🌐 Geopolítica"]
 )
 
 with tab_hoy:
@@ -921,6 +1032,53 @@ with tab_buscar:
                 if alcance_b == "Chile y el mundo":
                     st.markdown("## 🌐 En el mundo")
                 buscar_en_mundo(texto, rango_busqueda)
+        except Exception as e:
+            st.error(f"Algo falló: {e}")
+
+with tab_eco:
+    st.markdown("#### Indicadores de hoy")
+    indicadores = traer_indicadores()
+    if not indicadores:
+        st.caption("No pude cargar los indicadores en este momento.")
+    else:
+        for i in range(0, len(indicadores), 4):
+            for col, ind in zip(st.columns(4), indicadores[i : i + 4]):
+                delta = None
+                if ind["anterior"]:
+                    cambio = (ind["valor"] - ind["anterior"]) / ind["anterior"] * 100
+                    delta = f"{cambio:+.2f}% vs. día anterior".replace(".", ",")
+                col.metric(ind["nombre"], formatear_valor(ind["valor"], ind["formato"]), delta, delta_color="off")
+        st.caption("Fuente: mindicador.cl (datos del Banco Central y otras fuentes oficiales).")
+
+    st.markdown("#### Temas económicos")
+    st.write(
+        "Las noticias económicas contadas por medios de distintas tendencias y por la prensa especializada, "
+        "con lo que significan para tu bolsillo."
+    )
+    if st.button("Analizar los temas económicos", type="primary"):
+        st.session_state["eco"] = True
+    if st.session_state.get("eco"):
+        try:
+            with st.spinner("Leyendo noticias económicas..."):
+                noticias_eco = traer_economia(dias, max_por_medio)
+            if not noticias_eco:
+                st.warning("No llegaron noticias económicas. Prueba de nuevo en unos minutos.")
+            else:
+                st.caption(f"{len(noticias_eco)} titulares económicos de {len({n['medio'] for n in noticias_eco})} medios.")
+                with st.spinner("La IA está agrupando los temas económicos..."):
+                    temas_eco = agrupar_temas(noticias_eco, n_temas, "economia")
+                por_id_eco = {n["id"]: n for n in noticias_eco}
+                mostrados_eco = 0
+                for t in temas_eco:
+                    grupo = [por_id_eco[i] for i in t.get("ids", []) if i in por_id_eco]
+                    if len({n["tendencia"] for n in grupo}) < 2:
+                        continue
+                    with st.spinner(f"Analizando: {t.get('tema', '')}..."):
+                        analisis = analizar_tema(t.get("tema", ""), grupo, "economia")
+                    mostrar_analisis(t.get("tema", ""), grupo, analisis, f"eco_{mostrados_eco}", max(dias, 7))
+                    mostrados_eco += 1
+                if mostrados_eco == 0:
+                    st.info("No hubo temas económicos cubiertos por más de una fuente en este período.")
         except Exception as e:
             st.error(f"Algo falló: {e}")
 
