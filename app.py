@@ -25,7 +25,7 @@ ORDEN = ["izquierda", "centro", "derecha"]
 ETIQUETAS = {"izquierda": "⬅️ Izquierda", "centro": "⏺️ Centro", "derecha": "➡️ Derecha"}
 TRES_HORAS = 3 * 60 * 60
 
-st.set_page_config(page_title="Dos Caras", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="Dos Caras", page_icon="⚖️", layout="wide")
 
 
 # ---------------------------------------------------------------- utilidades
@@ -97,10 +97,13 @@ def llamar_ia(prompt, max_tokens=3000):
     if clave_gemini:
         from google import genai
 
-        respuesta = genai.Client(api_key=clave_gemini).models.generate_content(
+        # El cliente se guarda en una variable: si no, se cierra antes de enviar la pregunta.
+        cliente = genai.Client(api_key=clave_gemini)
+        respuesta = cliente.models.generate_content(
             model=secreto("GEMINI_MODEL", MODELO_GEMINI),
             contents=prompt,
-            config={"response_mime_type": "application/json", "max_output_tokens": max_tokens},
+            # margen extra: los modelos nuevos de Gemini "piensan" antes de responder
+            config={"response_mime_type": "application/json", "max_output_tokens": max_tokens * 3},
         )
         return extraer_json(respuesta.text or "")
 
@@ -232,7 +235,7 @@ def mostrar_analisis(tema, noticias, analisis):
 
 
 # ------------------------------------------------------------ pantalla
-st.title("🪙 Dos Caras")
+st.title("⚖️ Dos Caras")
 st.caption("Las noticias vistas desde todos los lados, para salir de la burbuja del algoritmo.")
 
 with st.sidebar:
