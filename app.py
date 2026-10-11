@@ -18,7 +18,8 @@ import streamlit as st
 
 from fuentes import MEDIOS
 
-MODELO_GEMINI = "gemini-3.8-flash"  # capa gratuita
+# Modelos gratuitos de Gemini, en orden de preferencia (si uno está saturado, prueba el siguiente)
+MODELOS_GEMINI = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 MODELO_CLAUDE = "claude-sonnet-5-5"  # opción pagada
 AGENTE = "Mozilla/5.0 (compatible; DosCaras/0.1)"
 ORDEN = ["izquierda", "centro", "derecha"]
@@ -95,17 +96,42 @@ def llamar_ia(prompt, max_tokens=3000):
     clave_claude = secreto("ANTHROPIC_API_KEY")
 
     if clave_gemini:
+        import time
+
         from google import genai
 
         # El cliente se guarda en una variable: si no, se cierra antes de enviar la pregunta.
         cliente = genai.Client(api_key=clave_gemini)
-        respuesta = cliente.models.generate_content(
-            model=secreto("GEMINI_MODEL", MODELO_GEMINI),
-            contents=prompt,
-            # margen extra: los modelos nuevos de Gemini "piensan" antes de responder
-            config={"response_mime_type": "application/json", "max_output_tokens": max_tokens * 3},
+        preferido = secreto("GEMINI_MODEL")
+        modelos = ([preferido] if preferido else []) + MODELOS_GEMINI
+        ultimo_error = None
+        for modelo in modelos:
+            for intento in range(2):  # si está saturado: espera y reintenta, luego prueba otro modelo
+                try:
+                    respuesta = cliente.models.generate_content(
+                        model=modelo,
+                        contents=prompt,
+                        # margen extra: los modelos nuevos de Gemini "piensan" antes de responder
+                        config={
+                            "response_mime_type": "application/json",
+                            "max_output_tokens": max_tokens * 3,
+                        },
+                    )
+                    return extraer_json(respuesta.text or "")
+                except Exception as e:
+                    ultimo_error = e
+                    texto_error = str(e)
+                    saturado = any(c in texto_error for c in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded"))
+                    no_existe = "404" in texto_error or "NOT_FOUND" in texto_error
+                    if no_existe:
+                        break  # este modelo no está disponible: pasar al siguiente
+                    if not saturado:
+                        raise
+                    time.sleep(3 * (intento + 1))
+        raise RuntimeError(
+            "Los modelos gratuitos de Gemini están saturados en este momento. "
+            f"Prueba de nuevo en unos minutos. (Detalle: {ultimo_error})"
         )
-        return extraer_json(respuesta.text or "")
 
     if clave_claude:
         from anthropic import Anthropic
