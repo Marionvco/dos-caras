@@ -52,6 +52,31 @@ def leer_json_web(url):
         return {}
 
 
+def rango_fechas(periodo):
+    """periodo: número de días hacia atrás, o (desde, hasta) como textos 'AAAA-MM-DD'.
+    Devuelve (desde, hasta) como fechas; 'hasta' es el día siguiente al último incluido."""
+    hoy = datetime.date.today()
+    if isinstance(periodo, (tuple, list)):
+        return datetime.date.fromisoformat(periodo[0]), datetime.date.fromisoformat(periodo[1])
+    return hoy - datetime.timedelta(days=int(periodo)), hoy + datetime.timedelta(days=1)
+
+
+def filtro_fecha(periodo):
+    """Filtro de fechas para Google News: reciente con 'when:', antiguo con 'after:'/'before:'."""
+    if not isinstance(periodo, (tuple, list)) and int(periodo) <= 30:
+        return f"when:{int(periodo)}d"
+    desde, hasta = rango_fechas(periodo)
+    return f"after:{desde.isoformat()} before:{hasta.isoformat()}"
+
+
+def texto_periodo(periodo):
+    if isinstance(periodo, (tuple, list)):
+        desde, hasta = rango_fechas(periodo)
+        ultimo = hasta - datetime.timedelta(days=1)
+        return f"del {desde.strftime('%d-%m-%Y')} al {ultimo.strftime('%d-%m-%Y')}"
+    return f"de los últimos {int(periodo)} días"
+
+
 def limpiar_titulo(titulo):
     # Google News agrega " - Nombre del medio" al final del titular
     return titulo.rsplit(" - ", 1)[0].strip() if " - " in titulo else titulo.strip()
@@ -75,7 +100,7 @@ def lista_para_prompt(noticias):
 def traer_titulares(texto_busqueda, dias, max_por_medio):
     noticias, vistos = [], set()
     for medio in MEDIOS:
-        consulta = f"{texto_busqueda} site:{medio['dominio']} when:{dias}d".strip()
+        consulta = f"{texto_busqueda} site:{medio['dominio']} {filtro_fecha(dias)}".strip()
         feed = feedparser.parse(url_google_news(consulta), agent=AGENTE)
         for entrada in feed.entries[:max_por_medio]:
             titulo = limpiar_titulo(entrada.get("title", ""))
@@ -98,7 +123,7 @@ def traer_titulares(texto_busqueda, dias, max_por_medio):
 def traer_de_pais(busqueda, codigo, dias=7, n=6):
     """Titulares del Google News de otro país, en su idioma."""
     pais = PAISES[codigo]
-    url = url_google_news(f"{busqueda} when:{dias}d", codigo, pais["hl"], pais["ceid"])
+    url = url_google_news(f"{busqueda} {filtro_fecha(dias)}", codigo, pais["hl"], pais["ceid"])
     feed = feedparser.parse(url, agent=AGENTE)
     salida = []
     idioma = idioma_de(pais["hl"])
@@ -110,7 +135,7 @@ def traer_internacionales(busqueda, dias=7, n=2):
     """Titulares de medios internacionales en español."""
     salida = []
     for medio in MEDIOS_INTERNACIONALES:
-        consulta = f"{busqueda} site:{medio['dominio']} when:{dias}d"
+        consulta = f"{busqueda} site:{medio['dominio']} {filtro_fecha(dias)}"
         feed = feedparser.parse(url_google_news(consulta), agent=AGENTE)
         for entrada in feed.entries[:n]:
             salida.append(
@@ -161,10 +186,10 @@ def traer_actor(codigo, busqueda_en, dias, n=6):
     salida = []
     if "edicion" in actor:
         hl, ceid, gl = actor["edicion"]
-        feed = feedparser.parse(url_google_news(f"{busqueda_en} when:{dias}d", gl, hl, ceid), agent=AGENTE)
+        feed = feedparser.parse(url_google_news(f"{busqueda_en} {filtro_fecha(dias)}", gl, hl, ceid), agent=AGENTE)
         salida += [entrada_a_noticia(e, idioma=idioma_de(hl)) for e in feed.entries[:n]]
     for nombre, dominio in actor.get("sitios", []):
-        consulta = f"{busqueda_en} site:{dominio} when:{dias}d"
+        consulta = f"{busqueda_en} site:{dominio} {filtro_fecha(dias)}"
         feed = feedparser.parse(url_google_news(consulta, "US", "en-US", "US:en"), agent=AGENTE)
         salida += [entrada_a_noticia(e, nombre, "inglés") for e in feed.entries[:3]]
     return salida
@@ -174,7 +199,7 @@ def traer_actor(codigo, busqueda_en, dias, n=6):
 def traer_agencias(busqueda_en, dias, n=2):
     salida = []
     for nombre, dominio in AGENCIAS:
-        consulta = f"{busqueda_en} site:{dominio} when:{dias}d"
+        consulta = f"{busqueda_en} site:{dominio} {filtro_fecha(dias)}"
         feed = feedparser.parse(url_google_news(consulta, "US", "en-US", "US:en"), agent=AGENTE)
         salida += [entrada_a_noticia(e, nombre, "inglés") for e in feed.entries[:n]]
     return salida
@@ -183,7 +208,7 @@ def traer_agencias(busqueda_en, dias, n=2):
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
 def traer_impacto_chile(busqueda_es, dias, n=8):
     """Titulares chilenos que conectan el conflicto con Chile."""
-    feed = feedparser.parse(url_google_news(f"{busqueda_es} Chile when:{dias}d"), agent=AGENTE)
+    feed = feedparser.parse(url_google_news(f"{busqueda_es} Chile {filtro_fecha(dias)}"), agent=AGENTE)
     return [entrada_a_noticia(e) for e in feed.entries[:n]]
 
 
@@ -213,12 +238,12 @@ def buscar_podcasts(busqueda, n=5, pais="CL"):
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def buscar_videos(busqueda, n=4, idioma="es", region="CL"):
+def buscar_videos(busqueda, n=4, idioma="es", region="CL", periodo=7):
     """Videos de YouTube sobre el tema. Solo funciona si hay YOUTUBE_API_KEY en los Secrets."""
     clave = secreto("YOUTUBE_API_KEY")
     if not clave:
         return None
-    desde = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    desde_d, hasta_d = rango_fechas(periodo)
     params = {
         "part": "snippet",
         "q": busqueda,
@@ -227,7 +252,8 @@ def buscar_videos(busqueda, n=4, idioma="es", region="CL"):
         "order": "relevance",
         "relevanceLanguage": idioma,
         "regionCode": region,
-        "publishedAfter": desde.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "publishedAfter": f"{desde_d.isoformat()}T00:00:00Z",
+        "publishedBefore": f"{hasta_d.isoformat()}T00:00:00Z",
         "key": clave,
     }
     datos = leer_json_web("https://www.googleapis.com/youtube/v3/search?" + urllib.parse.urlencode(params))
@@ -511,7 +537,7 @@ def lista_titulares(noticias, traducciones=None):
             )
 
 
-def mostrar_extras(tema, noticias, analisis, clave_ui):
+def mostrar_extras(tema, noticias, analisis, clave_ui, periodo=7):
     """Otros países, podcasts y videos. Solo se calcula si el usuario lo pide (ahorra la IA gratis)."""
     busqueda = analisis.get("busqueda") or tema
     paises = [p for p in analisis.get("paises", []) or [] if p.get("codigo") in PAISES]
@@ -526,10 +552,10 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
     with st.spinner("Buscando cómo lo cuentan en otros países..."):
         grupos = []
         for p in paises:
-            encontradas = traer_de_pais(p.get("busqueda") or busqueda, p["codigo"])
+            encontradas = traer_de_pais(p.get("busqueda") or busqueda, p["codigo"], periodo)
             if encontradas:
                 grupos.append({"nombre": PAISES[p["codigo"]]["nombre"], "noticias": encontradas})
-        internacionales = traer_internacionales(busqueda)
+        internacionales = traer_internacionales(busqueda, periodo)
         if internacionales:
             grupos.append({"nombre": "Medios internacionales", "noticias": internacionales})
         numerar_para_traducir(grupos)
@@ -538,7 +564,7 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
     if not paises:
         st.caption("Es un tema nacional: se muestra cómo lo cubren medios internacionales.")
     if not grupos:
-        st.caption("No encontré cobertura de otros países sobre este tema en los últimos 7 días.")
+        st.caption(f"No encontré cobertura de otros países sobre este tema {texto_periodo(periodo)}.")
     else:
         try:
             with st.spinner("La IA está comparando las miradas de cada país..."):
@@ -567,10 +593,10 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
     # --- Podcasts y videos
     st.markdown("### 🎧 Podcasts y 🎥 videos sobre el tema")
     st.caption("Encontrados automáticamente: no están verificados ni clasificados por tendencia.")
-    bloque_multimedia(busqueda)
+    bloque_multimedia(busqueda, periodo=periodo)
 
 
-def bloque_multimedia(busqueda, pais="CL", idioma="es", region="CL"):
+def bloque_multimedia(busqueda, pais="CL", idioma="es", region="CL", periodo=7):
     """Podcasts y videos sobre una búsqueda, en un idioma."""
     c1, c2 = st.columns(2)
     with c1:
@@ -587,7 +613,7 @@ def bloque_multimedia(busqueda, pais="CL", idioma="es", region="CL"):
         )
     with c2:
         st.markdown("**🎥 Videos**")
-        videos = buscar_videos(busqueda, idioma=idioma, region=region)
+        videos = buscar_videos(busqueda, idioma=idioma, region=region, periodo=periodo)
         if videos:
             for v in videos:
                 st.video(v["url"])
@@ -645,7 +671,7 @@ def mostrar_geopolitica(nombre, grupos, analisis):
     lista_puntos("❓ Preguntas abiertas", analisis.get("preguntas_abiertas", []))
 
 
-def mostrar_multimedia_geo(conflicto, clave_ui):
+def mostrar_multimedia_geo(conflicto, clave_ui, periodo=7):
     """Podcasts y videos del conflicto, en español y en inglés. Se carga solo si el usuario lo pide."""
     if not st.toggle("🎧 Podcasts y 🎥 videos sobre este conflicto", key=f"multi_{clave_ui}"):
         return
@@ -655,12 +681,12 @@ def mostrar_multimedia_geo(conflicto, clave_ui):
     )
     pestana_es, pestana_en = st.tabs(["En español", "En inglés"])
     with pestana_es:
-        bloque_multimedia(conflicto["busqueda_es"], pais="CL", idioma="es", region="CL")
+        bloque_multimedia(conflicto["busqueda_es"], pais="CL", idioma="es", region="CL", periodo=periodo)
     with pestana_en:
-        bloque_multimedia(conflicto["busqueda_en"], pais="US", idioma="en", region="US")
+        bloque_multimedia(conflicto["busqueda_en"], pais="US", idioma="en", region="US", periodo=periodo)
 
 
-def mostrar_analisis(tema, noticias, analisis, clave_ui="0"):
+def mostrar_analisis(tema, noticias, analisis, clave_ui="0", periodo=7):
     st.subheader(seguro(tema))
     st.write(seguro(analisis.get("resumen_neutral", "")))
 
@@ -697,7 +723,7 @@ def mostrar_analisis(tema, noticias, analisis, clave_ui="0"):
         )
 
     lista_puntos("❓ Preguntas abiertas", analisis.get("preguntas_abiertas", []))
-    mostrar_extras(tema, noticias, analisis, clave_ui)
+    mostrar_extras(tema, noticias, analisis, clave_ui, periodo)
     st.divider()
 
 
@@ -733,7 +759,7 @@ with st.container(border=True):
 
 with st.sidebar:
     st.header("Ajustes")
-    dias = st.slider("Noticias de los últimos días", 1, 3, 1)
+    dias = st.slider("Noticias de los últimos días", 1, 7, 1)
     max_por_medio = st.slider("Titulares por medio", 5, 20, 10)
     n_temas = st.slider("Temas a analizar", 2, 8, 4)
     if st.button("🔄 Traer noticias nuevas"):
@@ -788,7 +814,7 @@ def ejecutar_geo(conflicto, dias_g, clave_ui, min_actores=2):
     with st.spinner("La IA está comparando los relatos de cada lado..."):
         analisis_geo = analizar_geopolitica(conflicto["nombre"], grupos)
     mostrar_geopolitica(conflicto["nombre"], grupos, analisis_geo)
-    mostrar_multimedia_geo(conflicto, clave_ui)
+    mostrar_multimedia_geo(conflicto, clave_ui, dias_g)
 
 
 def buscar_en_chile(texto, rango_busqueda):
@@ -801,7 +827,7 @@ def buscar_en_chile(texto, rango_busqueda):
         return
     with st.spinner("La IA está comparando los enfoques..."):
         analisis = analizar_tema(texto, noticias[:40])
-    mostrar_analisis(texto, noticias[:40], analisis, "busqueda")
+    mostrar_analisis(texto, noticias[:40], analisis, "busqueda", rango_busqueda)
 
 
 def buscar_en_mundo(texto, rango_busqueda):
@@ -840,7 +866,7 @@ with tab_hoy:
                         continue
                     with st.spinner(f"Analizando: {t.get('tema', '')}..."):
                         analisis = analizar_tema(t.get("tema", ""), grupo)
-                    mostrar_analisis(t.get("tema", ""), grupo, analisis, f"hoy_{mostrados}")
+                    mostrar_analisis(t.get("tema", ""), grupo, analisis, f"hoy_{mostrados}", max(dias, 7))
                     mostrados += 1
                 if mostrados == 0:
                     st.info("Hoy no hubo temas cubiertos por más de una tendencia.")
@@ -858,7 +884,30 @@ with tab_buscar:
     with b1:
         alcance = st.radio("¿Dónde buscar?", ["Chile", "El mundo", "Chile y el mundo"], horizontal=True)
     with b2:
-        rango = st.selectbox("Período", [3, 7, 30], index=1, format_func=lambda d: f"Últimos {d} días")
+        OPCIONES_PERIODO = {
+            "Últimos 3 días": 3,
+            "Últimos 7 días": 7,
+            "Último mes": 30,
+            "Últimos 3 meses": 90,
+            "Último año": 365,
+            "📅 Elegir fechas": None,
+        }
+        eleccion = st.selectbox("Período", list(OPCIONES_PERIODO), index=1)
+        rango = OPCIONES_PERIODO[eleccion]
+        if rango is None:
+            hoy = datetime.date.today()
+            fechas = st.date_input(
+                "Desde – hasta",
+                value=(hoy - datetime.timedelta(days=30), hoy),
+                min_value=datetime.date(2005, 1, 1),
+                max_value=hoy,
+                format="DD/MM/YYYY",
+            )
+            if isinstance(fechas, (tuple, list)) and len(fechas) == 2:
+                rango = (fechas[0].isoformat(), (fechas[1] + datetime.timedelta(days=1)).isoformat())
+            else:
+                rango = 30
+                st.caption("Elige la fecha de inicio y la de término en el calendario.")
     if st.button("Buscar todas las caras", type="primary") and consulta.strip():
         st.session_state["busqueda"] = (consulta.strip(), rango, alcance)
     if st.session_state.get("busqueda"):
@@ -888,7 +937,12 @@ with tab_geo:
         texto_otro = st.text_input(
             "¿Qué conflicto quieres entender?", placeholder="Ej: Rusia y Ucrania, gas y petróleo"
         )
-    dias_geo = st.selectbox("Noticias de los últimos", [3, 7, 14], index=1, format_func=lambda d: f"{d} días")
+    dias_geo = st.selectbox(
+        "Noticias de los últimos",
+        [3, 7, 14, 30, 90],
+        index=1,
+        format_func=lambda d: {30: "Último mes", 90: "Últimos 3 meses"}.get(d, f"{d} días"),
+    )
     if st.button("Ver los dos lados", type="primary", key="btn_geo"):
         st.session_state["geo"] = (elegido, texto_otro.strip(), dias_geo)
 
