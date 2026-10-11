@@ -6,17 +6,20 @@ Cómo funciona:
 1. Lee titulares recientes de medios chilenos de distinta tendencia (vía Google News RSS).
 2. La IA (Gemini gratis, o Claude) agrupa los titulares que hablan del mismo hecho.
 3. Para cada hecho muestra: cómo lo cuenta cada lado, lo que coinciden (la intersección),
+   la mirada de otros países involucrados, y podcasts y videos sobre el tema.
    dónde difieren y qué afirmaciones tienen respaldo de varios lados.
 """
 
+import datetime
+import html
 import json
 import urllib.parse
+import urllib.request
 
 import feedparser
 import streamlit as st
 
-
-from fuentes import MEDIOS
+from fuentes import MEDIOS, MEDIOS_INTERNACIONALES, PAISES
 
 # Modelos gratuitos de Gemini, en orden de preferencia (si uno está saturado, prueba el siguiente)
 MODELOS_GEMINI = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
@@ -35,9 +38,18 @@ def seguro(texto):
     return str(texto).replace("$", "\\$").replace("[", "(").replace("]", ")")
 
 
-def url_google_news(consulta):
-    params = {"q": consulta, "hl": "es-419", "gl": "CL", "ceid": "CL:es-419"}
+def url_google_news(consulta, pais="CL", hl="es-419", ceid="CL:es-419"):
+    params = {"q": consulta, "hl": hl, "gl": pais, "ceid": ceid}
     return "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
+
+
+def leer_json_web(url):
+    try:
+        pedido = urllib.request.Request(url, headers={"User-Agent": AGENTE})
+        with urllib.request.urlopen(pedido, timeout=15) as r:
+            return json.load(r)
+    except Exception:
+        return {}
 
 
 def limpiar_titulo(titulo):
@@ -80,6 +92,98 @@ def traer_titulares(texto_busqueda, dias, max_por_medio):
                 }
             )
     return noticias
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def traer_de_pais(busqueda, codigo, dias=7, n=6):
+    """Titulares del Google News de otro país, en su idioma."""
+    pais = PAISES[codigo]
+    url = url_google_news(f"{busqueda} when:{dias}d", codigo, pais["hl"], pais["ceid"])
+    feed = feedparser.parse(url, agent=AGENTE)
+    salida = []
+    for entrada in feed.entries[:n]:
+        fuente = entrada.get("source", {}) or {}
+        salida.append(
+            {
+                "medio": fuente.get("title", "") or pais["nombre"],
+                "titulo": limpiar_titulo(entrada.get("title", "")),
+                "link": entrada.get("link", ""),
+            }
+        )
+    return salida
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def traer_internacionales(busqueda, dias=7, n=2):
+    """Titulares de medios internacionales en español."""
+    salida = []
+    for medio in MEDIOS_INTERNACIONALES:
+        consulta = f"{busqueda} site:{medio['dominio']} when:{dias}d"
+        feed = feedparser.parse(url_google_news(consulta), agent=AGENTE)
+        for entrada in feed.entries[:n]:
+            salida.append(
+                {
+                    "medio": medio["nombre"],
+                    "titulo": limpiar_titulo(entrada.get("title", "")),
+                    "link": entrada.get("link", ""),
+                }
+            )
+    return salida
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def buscar_podcasts(busqueda, n=5):
+    """Episodios de podcast sobre el tema (catálogo de Apple Podcasts, gratis y sin clave)."""
+    params = {
+        "term": busqueda,
+        "media": "podcast",
+        "entity": "podcastEpisode",
+        "country": "CL",
+        "limit": 15,
+    }
+    datos = leer_json_web("https://itunes.apple.com/search?" + urllib.parse.urlencode(params))
+    episodios = [
+        {
+            "titulo": x.get("trackName", ""),
+            "programa": x.get("collectionName", ""),
+            "link": x.get("trackViewUrl", ""),
+            "fecha": (x.get("releaseDate") or "")[:10],
+        }
+        for x in datos.get("results", [])
+        if x.get("trackName")
+    ]
+    episodios.sort(key=lambda e: e["fecha"], reverse=True)  # los más recientes primero
+    return episodios[:n]
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def buscar_videos(busqueda, n=4):
+    """Videos de YouTube sobre el tema. Solo funciona si hay YOUTUBE_API_KEY en los Secrets."""
+    clave = secreto("YOUTUBE_API_KEY")
+    if not clave:
+        return None
+    desde = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    params = {
+        "part": "snippet",
+        "q": busqueda,
+        "type": "video",
+        "maxResults": n,
+        "order": "relevance",
+        "relevanceLanguage": "es",
+        "regionCode": "CL",
+        "publishedAfter": desde.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "key": clave,
+    }
+    datos = leer_json_web("https://www.googleapis.com/youtube/v3/search?" + urllib.parse.urlencode(params))
+    return [
+        {
+            "titulo": html.unescape(v["snippet"]["title"]),
+            "canal": v["snippet"]["channelTitle"],
+            "url": f"https://www.youtube.com/watch?v={v['id']['videoId']}",
+        }
+        for v in datos.get("items", [])
+        if v.get("id", {}).get("videoId")
+    ]
 
 
 # ------------------------------------------------------------ 2. la IA
@@ -206,9 +310,49 @@ Responde SOLO con JSON con esta forma:
       "respaldo": "Coinciden varias tendencias | Solo una tendencia lo afirma | Requiere verificación",
       "comentario": "por qué"}}
   ],
-  "preguntas_abiertas": ["qué falta saber para formarse una opinión propia"]
-}}"""
+  "preguntas_abiertas": ["qué falta saber para formarse una opinión propia"],
+  "busqueda": "3 a 6 palabras clave en español para buscar este mismo tema en otros medios",
+  "paises": [
+    {{"codigo": "código de 2 letras", "busqueda": "3 a 6 palabras clave en el idioma de ese país"}}
+  ]
+}}
+
+En "paises" pon SOLO los países distintos de Chile que estén directamente involucrados en el tema
+(por ejemplo, un conflicto o acuerdo con ese país, o declaraciones de su gobierno o embajador).
+Usa solo estos códigos: {", ".join(f"{c} ({p['nombre']})" for c, p in PAISES.items())}.
+Si el tema es solo nacional, deja "paises" como lista vacía []."""
     return llamar_ia(prompt, 3000)
+
+
+def lista_simple(noticias):
+    return "\n".join(f"- {n['medio']} | {n['titulo']}" for n in noticias)
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def comparar_paises(tema, noticias_chile, grupos):
+    bloques = "\n\n".join(f"TITULARES DE {g['nombre'].upper()}:\n{lista_simple(g['noticias'])}" for g in grupos)
+    nombres = ["Chile"] + [g["nombre"] for g in grupos]
+    prompt = f"""Eres un analista de medios internacional, riguroso y neutral. Tema: "{tema}".
+Compara cómo cuentan este tema los medios de distintos países. Algunos titulares pueden estar en
+otro idioma: analízalos igual, pero responde todo en español.
+
+TITULARES DE CHILE:
+{lista_simple(noticias_chile)}
+
+{bloques}
+
+Reglas:
+- Usa SOLO lo que dicen estos titulares. No inventes hechos.
+- No juzgues qué país tiene razón. Muestra qué coincide y qué no.
+- Si los titulares de un país hablan de otra cosa, dilo.
+
+Responde SOLO con JSON con esta forma:
+{{
+  "miradas": {{{", ".join(f'"{n}": "cómo lo presentan sus medios"' for n in nombres)}}},
+  "en_comun": ["hechos que reportan medios de distintos países"],
+  "diferencias": ["diferencias de enfoque entre países: qué destaca u omite cada uno"]
+}}"""
+    return llamar_ia(prompt, 2500)
 
 
 # ---------------------------------------------------------- 3. mostrar
@@ -220,7 +364,95 @@ def lista_puntos(titulo, items):
         st.markdown(f"- {seguro(x)}")
 
 
-def mostrar_analisis(tema, noticias, analisis):
+def lista_titulares(noticias):
+    for n in noticias:
+        st.markdown(f"- [{seguro(n['titulo'])}]({n['link']}) — *{seguro(n['medio'])}*")
+
+
+def mostrar_extras(tema, noticias, analisis, clave_ui):
+    """Otros países, podcasts y videos. Solo se calcula si el usuario lo pide (ahorra la IA gratis)."""
+    busqueda = analisis.get("busqueda") or tema
+    paises = [p for p in analisis.get("paises", []) or [] if p.get("codigo") in PAISES]
+    nombres_paises = ", ".join(PAISES[p["codigo"]]["nombre"] for p in paises)
+    etiqueta = "🌎 Otros países, 🎧 podcasts y 🎥 videos"
+    if nombres_paises:
+        etiqueta += f" — involucra a {nombres_paises}"
+    if not st.toggle(etiqueta, key=f"extras_{clave_ui}"):
+        return
+
+    # --- La mirada desde otros países
+    with st.spinner("Buscando cómo lo cuentan en otros países..."):
+        grupos = []
+        for p in paises:
+            encontradas = traer_de_pais(p.get("busqueda") or busqueda, p["codigo"])
+            if encontradas:
+                grupos.append({"nombre": PAISES[p["codigo"]]["nombre"], "noticias": encontradas})
+        internacionales = traer_internacionales(busqueda)
+        if internacionales:
+            grupos.append({"nombre": "Medios internacionales", "noticias": internacionales})
+
+    st.markdown("### 🌎 La mirada desde otros países")
+    if not paises:
+        st.caption("Es un tema nacional: se muestra cómo lo cubren medios internacionales.")
+    if not grupos:
+        st.caption("No encontré cobertura de otros países sobre este tema en los últimos 7 días.")
+    else:
+        try:
+            with st.spinner("La IA está comparando las miradas de cada país..."):
+                comparacion = comparar_paises(tema, noticias, grupos)
+        except Exception as e:
+            comparacion = {}
+            st.warning(f"No pude comparar las miradas: {e}")
+        miradas = comparacion.get("miradas", {})
+        columnas = st.columns(len(grupos) + 1)
+        with columnas[0]:
+            st.markdown("#### 🇨🇱 Chile")
+            st.caption(seguro(miradas.get("Chile", "")))
+            st.caption("Titulares chilenos: arriba, en las tres columnas.")
+        for col, g in zip(columnas[1:], grupos):
+            with col:
+                st.markdown(f"#### {g['nombre']}")
+                st.caption(seguro(miradas.get(g["nombre"], "")))
+                lista_titulares(g["noticias"])
+        if comparacion:
+            c1, c2 = st.columns(2)
+            with c1:
+                lista_puntos("🤝 Lo que coinciden entre países", comparacion.get("en_comun", []))
+            with c2:
+                lista_puntos("↔️ Dónde difieren los países", comparacion.get("diferencias", []))
+
+    # --- Podcasts y videos
+    st.markdown("### 🎧 Podcasts y 🎥 videos sobre el tema")
+    st.caption("Encontrados automáticamente: no están verificados ni clasificados por tendencia.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**🎧 Episodios de podcast**")
+        with st.spinner("Buscando podcasts..."):
+            episodios = buscar_podcasts(busqueda)
+        if not episodios:
+            st.markdown("_No encontré episodios sobre este tema._")
+        for e in episodios:
+            st.markdown(f"- [{seguro(e['titulo'])}]({e['link']}) — *{seguro(e['programa'])}*, {e['fecha']}")
+        st.link_button(
+            "Buscar en Spotify",
+            "https://open.spotify.com/search/" + urllib.parse.quote(busqueda) + "/episodes",
+        )
+    with c2:
+        st.markdown("**🎥 Videos**")
+        videos = buscar_videos(busqueda)
+        if videos:
+            for v in videos:
+                st.video(v["url"])
+                st.caption(f"{seguro(v['titulo'])} — {seguro(v['canal'])}")
+        elif videos is not None:
+            st.markdown("_No encontré videos recientes sobre este tema._")
+        st.link_button(
+            "Buscar en YouTube",
+            "https://www.youtube.com/results?" + urllib.parse.urlencode({"search_query": busqueda}),
+        )
+
+
+def mostrar_analisis(tema, noticias, analisis, clave_ui="0"):
     st.subheader(seguro(tema))
     st.write(seguro(analisis.get("resumen_neutral", "")))
 
@@ -257,6 +489,7 @@ def mostrar_analisis(tema, noticias, analisis):
         )
 
     lista_puntos("❓ Preguntas abiertas", analisis.get("preguntas_abiertas", []))
+    mostrar_extras(tema, noticias, analisis, clave_ui)
     st.divider()
 
 
@@ -300,7 +533,7 @@ with tab_hoy:
                         continue
                     with st.spinner(f"Analizando: {t.get('tema', '')}..."):
                         analisis = analizar_tema(t.get("tema", ""), grupo)
-                    mostrar_analisis(t.get("tema", ""), grupo, analisis)
+                    mostrar_analisis(t.get("tema", ""), grupo, analisis, f"hoy_{mostrados}")
                     mostrados += 1
                 if mostrados == 0:
                     st.info("Hoy no hubo temas cubiertos por más de una tendencia.")
@@ -328,7 +561,7 @@ with tab_buscar:
             else:
                 with st.spinner("La IA está comparando los enfoques..."):
                     analisis = analizar_tema(texto, noticias[:40])
-                mostrar_analisis(texto, noticias[:40], analisis)
+                mostrar_analisis(texto, noticias[:40], analisis, "busqueda")
         except Exception as e:
             st.error(f"Algo falló: {e}")
 
