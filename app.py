@@ -101,16 +101,8 @@ def traer_de_pais(busqueda, codigo, dias=7, n=6):
     url = url_google_news(f"{busqueda} when:{dias}d", codigo, pais["hl"], pais["ceid"])
     feed = feedparser.parse(url, agent=AGENTE)
     salida = []
-    for entrada in feed.entries[:n]:
-        fuente = entrada.get("source", {}) or {}
-        salida.append(
-            {
-                "medio": fuente.get("title", "") or pais["nombre"],
-                "titulo": limpiar_titulo(entrada.get("title", "")),
-                "link": entrada.get("link", ""),
-            }
-        )
-    return salida
+    idioma = idioma_de(pais["hl"])
+    return [entrada_a_noticia(e, idioma=idioma) for e in feed.entries[:n]]
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
@@ -131,28 +123,50 @@ def traer_internacionales(busqueda, dias=7, n=2):
     return salida
 
 
-def entrada_a_noticia(entrada, medio=None):
+def entrada_a_noticia(entrada, medio=None, idioma=None):
+    """idioma: None si está en español; si no, el nombre del idioma (para traducirlo)."""
     fuente = entrada.get("source", {}) or {}
     return {
         "medio": medio or fuente.get("title", "") or "Google News",
         "titulo": limpiar_titulo(entrada.get("title", "")),
         "link": entrada.get("link", ""),
+        "idioma": idioma,
     }
+
+
+def idioma_de(hl):
+    nombres = {"en": "inglés", "pt": "portugués", "fr": "francés", "de": "alemán", "zh": "chino", "ru": "ruso"}
+    return nombres.get(hl.split("-")[0])
+
+
+def numerar_para_traducir(grupos):
+    """Pone un número a cada titular que no está en español, para pedir su traducción."""
+    k = 1
+    for g in grupos:
+        for noticia in g["noticias"]:
+            if noticia.get("idioma"):
+                noticia["n"] = k
+                k += 1
+    return grupos
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
 def traer_actor(codigo, busqueda_en, dias, n=6):
     """Titulares de un actor de un conflicto: su Google News, o sus medios propios."""
-    actor = ACTORES[codigo]
+    if codigo in ACTORES:
+        actor = ACTORES[codigo]
+    else:  # un país de la lista PAISES: se busca en su Google News
+        p = PAISES[codigo]
+        actor = {"nombre": p["nombre"], "edicion": (p["hl"], p["ceid"], codigo)}
     salida = []
     if "edicion" in actor:
         hl, ceid, gl = actor["edicion"]
         feed = feedparser.parse(url_google_news(f"{busqueda_en} when:{dias}d", gl, hl, ceid), agent=AGENTE)
-        salida += [entrada_a_noticia(e) for e in feed.entries[:n]]
+        salida += [entrada_a_noticia(e, idioma=idioma_de(hl)) for e in feed.entries[:n]]
     for nombre, dominio in actor.get("sitios", []):
         consulta = f"{busqueda_en} site:{dominio} when:{dias}d"
         feed = feedparser.parse(url_google_news(consulta, "US", "en-US", "US:en"), agent=AGENTE)
-        salida += [entrada_a_noticia(e, nombre) for e in feed.entries[:3]]
+        salida += [entrada_a_noticia(e, nombre, "inglés") for e in feed.entries[:3]]
     return salida
 
 
@@ -162,7 +176,7 @@ def traer_agencias(busqueda_en, dias, n=2):
     for nombre, dominio in AGENCIAS:
         consulta = f"{busqueda_en} site:{dominio} when:{dias}d"
         feed = feedparser.parse(url_google_news(consulta, "US", "en-US", "US:en"), agent=AGENTE)
-        salida += [entrada_a_noticia(e, nombre) for e in feed.entries[:n]]
+        salida += [entrada_a_noticia(e, nombre, "inglés") for e in feed.entries[:n]]
     return salida
 
 
@@ -174,13 +188,13 @@ def traer_impacto_chile(busqueda_es, dias, n=8):
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def buscar_podcasts(busqueda, n=5):
+def buscar_podcasts(busqueda, n=5, pais="CL"):
     """Episodios de podcast sobre el tema (catálogo de Apple Podcasts, gratis y sin clave)."""
     params = {
         "term": busqueda,
         "media": "podcast",
         "entity": "podcastEpisode",
-        "country": "CL",
+        "country": pais,
         "limit": 15,
     }
     datos = leer_json_web("https://itunes.apple.com/search?" + urllib.parse.urlencode(params))
@@ -199,7 +213,7 @@ def buscar_podcasts(busqueda, n=5):
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def buscar_videos(busqueda, n=4):
+def buscar_videos(busqueda, n=4, idioma="es", region="CL"):
     """Videos de YouTube sobre el tema. Solo funciona si hay YOUTUBE_API_KEY en los Secrets."""
     clave = secreto("YOUTUBE_API_KEY")
     if not clave:
@@ -211,8 +225,8 @@ def buscar_videos(busqueda, n=4):
         "type": "video",
         "maxResults": n,
         "order": "relevance",
-        "relevanceLanguage": "es",
-        "regionCode": "CL",
+        "relevanceLanguage": idioma,
+        "regionCode": region,
         "publishedAfter": desde.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "key": clave,
     }
@@ -367,7 +381,15 @@ Si el tema es solo nacional, deja "paises" como lista vacía []."""
 
 
 def lista_simple(noticias):
-    return "\n".join(f"- {n['medio']} | {n['titulo']}" for n in noticias)
+    """Los titulares en otro idioma llevan su número [n], para pedir la traducción."""
+    return "\n".join(
+        (f"[{x['n']}] " if x.get("n") else "- ") + f"{x['medio']} | {x['titulo']}" for x in noticias
+    )
+
+
+INSTRUCCION_TRADUCIR = """
+Además, en "traducciones" traduce al español CADA titular marcado con [número], de forma fiel
+(sin agregar ni quitar sentido, ni suavizar el tono). La clave es el número como texto."""
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
@@ -392,24 +414,35 @@ Responde SOLO con JSON con esta forma:
 {{
   "miradas": {{{", ".join(f'"{n}": "cómo lo presentan sus medios"' for n in nombres)}}},
   "en_comun": ["hechos que reportan medios de distintos países"],
-  "diferencias": ["diferencias de enfoque entre países: qué destaca u omite cada uno"]
-}}"""
-    return llamar_ia(prompt, 2500)
+  "diferencias": ["diferencias de enfoque entre países: qué destaca u omite cada uno"],
+  "traducciones": {{"1": "titular 1 traducido al español"}}
+}}
+{INSTRUCCION_TRADUCIR}"""
+    return llamar_ia(prompt, 3500)
+
+
+def todos_los_actores():
+    return list(ACTORES) + [c for c in PAISES if c not in ACTORES]
+
+
+def nombre_actor(codigo):
+    return ACTORES[codigo]["nombre"] if codigo in ACTORES else PAISES[codigo]["nombre"]
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
 def definir_conflicto(texto):
     """Convierte lo que escribe el usuario en un conflicto con sus lados y palabras de búsqueda."""
-    codigos = ", ".join(f"{c} ({a['nombre']})" for c, a in ACTORES.items())
+    codigos = ", ".join(f"{c} ({nombre_actor(c)})" for c in todos_los_actores())
     prompt = f"""El usuario quiere entender este conflicto o tema internacional: "{texto}".
-Identifica los actores principales (2 o 3) usando SOLO estos códigos: {codigos}.
+Identifica los actores principales (1 a 3 países o bloques) usando SOLO estos códigos: {codigos}.
+Si el tema involucra a Chile, NO incluyas a Chile como actor (Chile ya se revisa aparte).
 Responde SOLO con JSON:
 {{"nombre": "nombre corto y neutral del conflicto",
   "actores": ["US", "CN"],
   "busqueda_en": "3 a 5 palabras clave en inglés",
   "busqueda_es": "3 a 5 palabras clave en español"}}"""
     datos = llamar_ia(prompt, 400)
-    datos["actores"] = [a for a in datos.get("actores", []) if a in ACTORES]
+    datos["actores"] = [a for a in datos.get("actores", []) if a in todos_los_actores()][:3]
     return datos
 
 
@@ -443,9 +476,11 @@ Responde SOLO con JSON con esta forma:
       "efecto": "cómo podría afectar a Chile, en lenguaje simple",
       "respaldo": "Lo dicen los titulares | Posible, requiere verificación"}}
   ],
-  "preguntas_abiertas": ["qué falta saber"]
-}}"""
-    return llamar_ia(prompt, 3500)
+  "preguntas_abiertas": ["qué falta saber"],
+  "traducciones": {{"1": "titular 1 traducido al español"}}
+}}
+{INSTRUCCION_TRADUCIR}"""
+    return llamar_ia(prompt, 5000)
 
 
 # ---------------------------------------------------------- 3. mostrar
@@ -457,9 +492,23 @@ def lista_puntos(titulo, items):
         st.markdown(f"- {seguro(x)}")
 
 
-def lista_titulares(noticias):
-    for n in noticias:
-        st.markdown(f"- [{seguro(n['titulo'])}]({n['link']}) — *{seguro(n['medio'])}*")
+def lista_titulares(noticias, traducciones=None):
+    """Titulares con link. Si están en otro idioma: el titular en español y, debajo, el original."""
+    traducciones = traducciones or {}
+    for x in noticias:
+        traducido = traducciones.get(str(x.get("n"))) if x.get("n") else None
+        if traducido:
+            st.markdown(
+                f"- [{seguro(traducido)}]({x['link']}) — *{seguro(x['medio'])}*  \n"
+                f"  <small>Original en {x['idioma']}: “{seguro(x['titulo'])}”</small>",
+                unsafe_allow_html=True,
+            )
+        else:
+            aviso = f" · <small>en {x['idioma']}</small>" if x.get("idioma") else ""
+            st.markdown(
+                f"- [{seguro(x['titulo'])}]({x['link']}) — *{seguro(x['medio'])}*{aviso}",
+                unsafe_allow_html=True,
+            )
 
 
 def mostrar_extras(tema, noticias, analisis, clave_ui):
@@ -483,6 +532,7 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
         internacionales = traer_internacionales(busqueda)
         if internacionales:
             grupos.append({"nombre": "Medios internacionales", "noticias": internacionales})
+        numerar_para_traducir(grupos)
 
     st.markdown("### 🌎 La mirada desde otros países")
     if not paises:
@@ -506,7 +556,7 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
             with col:
                 st.markdown(f"#### {g['nombre']}")
                 st.caption(seguro(miradas.get(g["nombre"], "")))
-                lista_titulares(g["noticias"])
+                lista_titulares(g["noticias"], comparacion.get("traducciones"))
         if comparacion:
             c1, c2 = st.columns(2)
             with c1:
@@ -517,11 +567,16 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
     # --- Podcasts y videos
     st.markdown("### 🎧 Podcasts y 🎥 videos sobre el tema")
     st.caption("Encontrados automáticamente: no están verificados ni clasificados por tendencia.")
+    bloque_multimedia(busqueda)
+
+
+def bloque_multimedia(busqueda, pais="CL", idioma="es", region="CL"):
+    """Podcasts y videos sobre una búsqueda, en un idioma."""
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**🎧 Episodios de podcast**")
         with st.spinner("Buscando podcasts..."):
-            episodios = buscar_podcasts(busqueda)
+            episodios = buscar_podcasts(busqueda, pais=pais)
         if not episodios:
             st.markdown("_No encontré episodios sobre este tema._")
         for e in episodios:
@@ -532,7 +587,7 @@ def mostrar_extras(tema, noticias, analisis, clave_ui):
         )
     with c2:
         st.markdown("**🎥 Videos**")
-        videos = buscar_videos(busqueda)
+        videos = buscar_videos(busqueda, idioma=idioma, region=region)
         if videos:
             for v in videos:
                 st.video(v["url"])
@@ -558,13 +613,13 @@ def mostrar_geopolitica(nombre, grupos, analisis):
                 st.info(g["nota"])
             st.caption(seguro(miradas.get(g["nombre"], "")))
             if g["noticias"]:
-                lista_titulares(g["noticias"])
+                lista_titulares(g["noticias"], analisis.get("traducciones"))
             else:
                 st.markdown("_Sin titulares en los últimos días._")
 
     c1, c2 = st.columns(2)
     with c1:
-        lista_puntos("🤝 Lo que coinciden los dos lados", analisis.get("en_comun", []))
+        lista_puntos("🤝 Lo que coinciden los distintos lados", analisis.get("en_comun", []))
     with c2:
         lista_puntos("↔️ Dónde difieren los relatos", analisis.get("diferencias", []))
 
@@ -588,6 +643,21 @@ def mostrar_geopolitica(nombre, grupos, analisis):
             lista_titulares(chile["noticias"])
 
     lista_puntos("❓ Preguntas abiertas", analisis.get("preguntas_abiertas", []))
+
+
+def mostrar_multimedia_geo(conflicto, clave_ui):
+    """Podcasts y videos del conflicto, en español y en inglés. Se carga solo si el usuario lo pide."""
+    if not st.toggle("🎧 Podcasts y 🎥 videos sobre este conflicto", key=f"multi_{clave_ui}"):
+        return
+    st.caption(
+        "Encontrados automáticamente: no están verificados ni clasificados por lado. "
+        "Revisa quién los produce antes de darlos por ciertos."
+    )
+    pestana_es, pestana_en = st.tabs(["En español", "En inglés"])
+    with pestana_es:
+        bloque_multimedia(conflicto["busqueda_es"], pais="CL", idioma="es", region="CL")
+    with pestana_en:
+        bloque_multimedia(conflicto["busqueda_en"], pais="US", idioma="en", region="US")
 
 
 def mostrar_analisis(tema, noticias, analisis, clave_ui="0"):
@@ -633,7 +703,33 @@ def mostrar_analisis(tema, noticias, analisis, clave_ui="0"):
 
 # ------------------------------------------------------------ pantalla
 st.title("⚖️ Dos Caras")
-st.caption("Las noticias vistas desde todos los lados, para salir de la burbuja del algoritmo.")
+st.markdown("#### Las noticias completas, no solo la mitad que el algoritmo elige para ti.")
+
+with st.container(border=True):
+    st.markdown(
+        "Las redes sociales y los buscadores aprenden lo que te gusta y te muestran más de lo mismo. "
+        "Sin darte cuenta, terminas viendo **una sola cara de la moneda**.\n\n"
+        "**Dos Caras rompe esa burbuja.** Reunimos lo que publican medios de distintas tendencias y "
+        "países sobre un mismo hecho, y con inteligencia artificial te mostramos **en qué coinciden, "
+        "dónde difieren y qué está realmente respaldado**."
+    )
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.markdown(
+            "**🧭 Todas las miradas**  \nIzquierda, centro y derecha. Chile y el mundo. "
+            "Lado a lado, en una sola pantalla."
+        )
+    with p2:
+        st.markdown(
+            "**🤝 Los hechos en común**  \nLa intersección de lo que todos reportan, "
+            "separada de la opinión y del énfasis de cada medio."
+        )
+    with p3:
+        st.markdown(
+            "**🔎 Tú decides**  \nFuentes originales a un clic, más podcasts y videos, "
+            "para que formes tu propia opinión."
+        )
+    st.markdown("**No te decimos qué pensar. Te mostramos el panorama completo.**")
 
 with st.sidebar:
     st.header("Ajustes")
@@ -647,8 +743,79 @@ with st.sidebar:
             st.write(f"{ETIQUETAS[m['tendencia']]} — {m['nombre']}")
         st.caption("Clasificación inicial, editable en fuentes.py.")
 
+def ejecutar_geo(conflicto, dias_g, clave_ui, min_actores=2):
+    """Trae las noticias de cada lado, las analiza y muestra todo (también podcasts y videos)."""
+    if len(conflicto.get("actores", [])) < min_actores:
+        st.warning(
+            "No pude identificar los lados con los países disponibles. "
+            "Prueba describiéndolo de otra forma (o agrega el país en fuentes.py)."
+        )
+        return
+    with st.spinner("Leyendo los medios de cada lado..."):
+        grupos = []
+        for codigo in conflicto.get("actores", []):
+            actor = ACTORES.get(codigo, {})
+            grupos.append(
+                {
+                    "nombre": nombre_actor(codigo),
+                    "nota": actor.get("nota", ""),
+                    "tipo": "actor",
+                    "noticias": traer_actor(codigo, conflicto["busqueda_en"], dias_g),
+                }
+            )
+        grupos.append(
+            {
+                "nombre": "Agencias internacionales",
+                "nota": "",
+                "tipo": "agencias",
+                "noticias": traer_agencias(conflicto["busqueda_en"], dias_g),
+            }
+        )
+        grupos.append(
+            {
+                "nombre": "Medios chilenos",
+                "nota": "",
+                "tipo": "chile",
+                "noticias": traer_impacto_chile(conflicto["busqueda_es"], dias_g),
+            }
+        )
+    numerar_para_traducir(grupos)
+    total = sum(len(g["noticias"]) for g in grupos)
+    st.caption(f"{total} titulares encontrados.")
+    if total == 0:
+        st.warning("No encontré noticias recientes sobre este tema.")
+        return
+    with st.spinner("La IA está comparando los relatos de cada lado..."):
+        analisis_geo = analizar_geopolitica(conflicto["nombre"], grupos)
+    mostrar_geopolitica(conflicto["nombre"], grupos, analisis_geo)
+    mostrar_multimedia_geo(conflicto, clave_ui)
+
+
+def buscar_en_chile(texto, rango_busqueda):
+    with st.spinner("Buscando en los medios chilenos..."):
+        clave = palabras_clave(texto)
+        noticias = traer_titulares(clave, rango_busqueda, 5)
+    st.caption(f"Búsqueda usada: {clave}")
+    if not noticias:
+        st.warning("No encontré esta noticia en los medios chilenos revisados. Prueba con menos palabras.")
+        return
+    with st.spinner("La IA está comparando los enfoques..."):
+        analisis = analizar_tema(texto, noticias[:40])
+    mostrar_analisis(texto, noticias[:40], analisis, "busqueda")
+
+
+def buscar_en_mundo(texto, rango_busqueda):
+    with st.spinner("La IA está identificando los países involucrados..."):
+        tema = definir_conflicto(texto)
+    if tema.get("actores"):
+        st.caption("Países o bloques revisados: " + ", ".join(nombre_actor(c) for c in tema["actores"]))
+    else:
+        st.caption("No se identificó un país en particular: se revisan agencias internacionales y medios chilenos.")
+    ejecutar_geo(tema, rango_busqueda, "mundo_" + texto, min_actores=0)
+
+
 tab_hoy, tab_buscar, tab_geo = st.tabs(
-    ["📰 Temas del día", "🔍 Ver las otras caras de una noticia", "🌐 Geopolítica"]
+    ["📰 Temas del día", "🔍 Buscar una noticia", "🌐 Geopolítica"]
 )
 
 with tab_hoy:
@@ -682,26 +849,29 @@ with tab_hoy:
 
 with tab_buscar:
     st.write(
-        "¿Viste una noticia y quieres saber cómo la cuentan los otros lados? "
-        "Escribe el tema o pega el titular."
+        "¿Viste una noticia y quieres conocer todas sus caras? Escribe el tema o pega el titular. "
+        "Te mostramos cómo la cuentan los distintos medios, en Chile y en el mundo, con su análisis, "
+        "podcasts y videos."
     )
-    consulta = st.text_input("Tema o titular", placeholder="Ej: reforma de pensiones")
-    rango = st.selectbox("Buscar en", [3, 7, 30], index=1, format_func=lambda d: f"Últimos {d} días")
-    if st.button("Buscar las otras caras", type="primary") and consulta.strip():
-        st.session_state["busqueda"] = (consulta.strip(), rango)
+    consulta = st.text_input("Tema o titular", placeholder="Ej: reforma de pensiones, aranceles al cobre, elecciones en Brasil")
+    b1, b2 = st.columns(2)
+    with b1:
+        alcance = st.radio("¿Dónde buscar?", ["Chile", "El mundo", "Chile y el mundo"], horizontal=True)
+    with b2:
+        rango = st.selectbox("Período", [3, 7, 30], index=1, format_func=lambda d: f"Últimos {d} días")
+    if st.button("Buscar todas las caras", type="primary") and consulta.strip():
+        st.session_state["busqueda"] = (consulta.strip(), rango, alcance)
     if st.session_state.get("busqueda"):
-        texto, rango_busqueda = st.session_state["busqueda"]
+        texto, rango_busqueda, alcance_b = st.session_state["busqueda"]
         try:
-            with st.spinner("Buscando en todos los medios..."):
-                clave = palabras_clave(texto)
-                noticias = traer_titulares(clave, rango_busqueda, 5)
-            st.caption(f"Búsqueda usada: {clave}")
-            if not noticias:
-                st.warning("No encontré esta noticia en los medios revisados. Prueba con menos palabras.")
-            else:
-                with st.spinner("La IA está comparando los enfoques..."):
-                    analisis = analizar_tema(texto, noticias[:40])
-                mostrar_analisis(texto, noticias[:40], analisis, "busqueda")
+            if alcance_b in ("Chile", "Chile y el mundo"):
+                if alcance_b == "Chile y el mundo":
+                    st.markdown("## 📍 En Chile")
+                buscar_en_chile(texto, rango_busqueda)
+            if alcance_b in ("El mundo", "Chile y el mundo"):
+                if alcance_b == "Chile y el mundo":
+                    st.markdown("## 🌐 En el mundo")
+                buscar_en_mundo(texto, rango_busqueda)
         except Exception as e:
             st.error(f"Algo falló: {e}")
 
@@ -734,51 +904,8 @@ with tab_geo:
                         conflicto = definir_conflicto(otro_g)
             else:
                 conflicto = next(c for c in CONFLICTOS if c["nombre"] == elegido_g)
-
-            if conflicto is None:
-                pass
-            elif len(conflicto.get("actores", [])) < 2:
-                st.warning(
-                    "No pude identificar dos lados con los países disponibles. "
-                    "Prueba describiéndolo de otra forma (o agrega el país en fuentes.py)."
-                )
-            else:
-                with st.spinner("Leyendo los medios de cada lado..."):
-                    grupos = []
-                    for codigo in conflicto["actores"]:
-                        actor = ACTORES[codigo]
-                        grupos.append(
-                            {
-                                "nombre": actor["nombre"],
-                                "nota": actor.get("nota", ""),
-                                "tipo": "actor",
-                                "noticias": traer_actor(codigo, conflicto["busqueda_en"], dias_g),
-                            }
-                        )
-                    grupos.append(
-                        {
-                            "nombre": "Agencias internacionales",
-                            "nota": "",
-                            "tipo": "agencias",
-                            "noticias": traer_agencias(conflicto["busqueda_en"], dias_g),
-                        }
-                    )
-                    grupos.append(
-                        {
-                            "nombre": "Medios chilenos",
-                            "nota": "",
-                            "tipo": "chile",
-                            "noticias": traer_impacto_chile(conflicto["busqueda_es"], dias_g),
-                        }
-                    )
-                total = sum(len(g["noticias"]) for g in grupos)
-                st.caption(f"{total} titulares encontrados.")
-                if total == 0:
-                    st.warning("No encontré noticias recientes sobre este conflicto.")
-                else:
-                    with st.spinner("La IA está comparando los relatos de cada lado..."):
-                        analisis_geo = analizar_geopolitica(conflicto["nombre"], grupos)
-                    mostrar_geopolitica(conflicto["nombre"], grupos, analisis_geo)
+            if conflicto is not None:
+                ejecutar_geo(conflicto, dias_g, "geo_" + conflicto["nombre"])
         except Exception as e:
             st.error(f"Algo falló: {e}")
 
