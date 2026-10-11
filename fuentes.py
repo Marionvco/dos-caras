@@ -54,3 +54,72 @@ PAISES = {
     "FR": {"nombre": "Francia", "hl": "fr", "ceid": "FR:fr"},
     "DE": {"nombre": "Alemania", "hl": "de", "ceid": "DE:de"},
 }
+
+
+# ------------------------------------------------------------------ GEOPOLÍTICA
+# Actores de los conflictos internacionales y dónde leer su versión.
+# "edicion": se busca en el Google News de ese país (idioma, edición, país).
+# "sitios": se busca en esos medios específicos (en inglés).
+# "nota": aviso que se muestra al lector (por ejemplo, si son medios estatales).
+ACTORES = {
+    "US": {"nombre": "Estados Unidos", "edicion": ("en-US", "US:en", "US")},
+    "CN": {
+        "nombre": "China",
+        "sitios": [("Xinhua", "xinhuanet.com"), ("Global Times", "globaltimes.cn"), ("CGTN", "cgtn.com")],
+        "nota": "Medios estatales chinos: reflejan la postura oficial del gobierno.",
+    },
+    "RU": {
+        "nombre": "Rusia",
+        "sitios": [("TASS", "tass.com"), ("RT", "rt.com")],
+        "nota": "Medios estatales rusos: reflejan la postura oficial del gobierno.",
+    },
+    "IR": {
+        "nombre": "Irán",
+        "sitios": [("Press TV", "presstv.ir"), ("Tehran Times", "tehrantimes.com"), ("IRNA", "irna.ir")],
+        "nota": "Medios estatales o afines al gobierno iraní: reflejan su postura oficial.",
+    },
+    "UA": {
+        "nombre": "Ucrania",
+        "sitios": [("Kyiv Independent", "kyivindependent.com"), ("Ukrinform", "ukrinform.net")],
+    },
+    "IL": {
+        "nombre": "Israel",
+        "sitios": [("The Times of Israel", "timesofisrael.com"), ("Haaretz", "haaretz.com")],
+    },
+    "EU": {
+        "nombre": "Unión Europea",
+        "sitios": [("Euronews", "euronews.com"), ("Politico Europe", "politico.eu")],
+    },
+}
+
+# Agencias y medios internacionales que cubren a todos los lados.
+AGENCIAS = [
+    ("Reuters", "reuters.com"),
+    ("AP", "apnews.com"),
+    ("BBC", "bbc.com"),
+    ("Al Jazeera", "aljazeera.com"),
+]
+
+# Conflictos que aparecen en la lista. Para agregar uno, copia un bloque.
+# "busqueda_en": palabras clave en inglés (para los medios de cada lado).
+# "busqueda_es": palabras clave en español (para medios chilenos e impacto en Chile).
+CONFLICTOS = [
+    {
+        "nombre": "Estados Unidos vs Irán",
+        "actores": ["US", "IR"],
+        "busqueda_en": "United States Iran",
+        "busqueda_es": "Estados Unidos Irán",
+    },
+    {
+        "nombre": "Guerra comercial Estados Unidos vs China",
+        "actores": ["US", "CN"],
+        "busqueda_en": "US China tariffs trade",
+        "busqueda_es": "China Estados Unidos aranceles",
+    },
+    {
+        "nombre": "Sanciones de Estados Unidos a Rusia",
+        "actores": ["US", "RU"],
+        "busqueda_en": "US sanctions Russia",
+        "busqueda_es": "sanciones Estados Unidos Rusia",
+    },
+]
