@@ -13,6 +13,8 @@ Cómo funciona:
 import datetime
 import html
 import json
+import re
+import unicodedata
 import urllib.parse
 import urllib.request
 
@@ -22,6 +24,7 @@ import streamlit as st
 from fuentes import (
     ACTORES,
     AGENCIAS,
+    CANALES_VIDEO,
     CONFLICTOS,
     CONSULTA_ECONOMIA,
     INDICADORES,
@@ -29,6 +32,7 @@ from fuentes import (
     MEDIOS_ECONOMICOS,
     MEDIOS_INTERNACIONALES,
     PAISES,
+    PODCASTS,
 )
 
 # Modelos gratuitos de Gemini, en orden de preferencia (si uno está saturado, prueba el siguiente)
@@ -41,7 +45,9 @@ ETIQUETAS = {
     "centro": "⏺️ Centro",
     "derecha": "➡️ Derecha",
     "especializada": "📊 Prensa económica",
+    "internacional": "🌐 Internacional",
 }
+UNA_SEMANA = 7 * 24 * 60 * 60
 UNA_HORA = 60 * 60
 TRES_HORAS = 3 * 60 * 60
 
@@ -294,14 +300,15 @@ def traer_impacto_chile(busqueda_es, dias, n=8):
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
-def buscar_podcasts(busqueda, n=5, pais="CL"):
-    """Episodios de podcast sobre el tema (catálogo de Apple Podcasts, gratis y sin clave)."""
+def buscar_podcasts(busqueda, n=5, pais="CL", periodo=None):
+    """Episodios de podcast sobre el tema (catálogo de Apple Podcasts, gratis y sin clave).
+    Si hay período, solo se quedan los episodios publicados dentro de esas fechas."""
     params = {
         "term": busqueda,
         "media": "podcast",
         "entity": "podcastEpisode",
         "country": pais,
-        "limit": 15,
+        "limit": 50,
     }
     datos = leer_json_web("https://itunes.apple.com/search?" + urllib.parse.urlencode(params))
     episodios = [
@@ -314,8 +321,183 @@ def buscar_podcasts(busqueda, n=5, pais="CL"):
         for x in datos.get("results", [])
         if x.get("trackName")
     ]
+    if periodo is not None:
+        desde, hasta = rango_fechas(periodo)
+        episodios = [e for e in episodios if e["fecha"] and desde.isoformat() <= e["fecha"] < hasta.isoformat()]
     episodios.sort(key=lambda e: e["fecha"], reverse=True)  # los más recientes primero
     return episodios[:n]
+
+
+# ---------------------------------------------------- videos por canal y tendencia
+def normalizar(texto):
+    texto = unicodedata.normalize("NFKD", str(texto).lower())
+    return "".join(c for c in texto if not unicodedata.combining(c))
+
+
+def coincide(texto, busqueda):
+    """El video trata el tema si contiene al menos la mitad de las palabras importantes de la búsqueda."""
+    palabras = [p for p in re.findall(r"\w+", normalizar(busqueda)) if len(p) > 3]
+    if not palabras:
+        return False
+    t = normalizar(texto)
+    return sum(1 for p in palabras if p in t) >= max(1, (len(palabras) + 1) // 2)
+
+
+def yt_get(recurso, params):
+    clave = secreto("YOUTUBE_API_KEY")
+    if not clave:
+        return {}
+    params = dict(params, key=clave)
+    return leer_json_web(f"https://www.googleapis.com/youtube/v3/{recurso}?" + urllib.parse.urlencode(params))
+
+
+@st.cache_data(ttl=UNA_SEMANA, show_spinner=False)
+def _resolver_canal(nombre, handle=""):
+    """Encuentra el canal de YouTube: por su handle (@...) o, si no hay, buscándolo por nombre."""
+    items = []
+    if handle:
+        items = yt_get("channels", {"part": "snippet,contentDetails", "forHandle": handle}).get("items", [])
+    if not items:
+        resultado = yt_get("search", {"part": "snippet", "q": nombre, "type": "channel", "maxResults": 1})
+        if not resultado:
+            raise ConnectionError("YouTube no respondió")  # no se guarda en caché; se reintenta luego
+        ids = [i.get("id", {}).get("channelId") for i in resultado.get("items", [])]
+        ids = [i for i in ids if i]
+        if not ids:
+            return None
+        items = yt_get("channels", {"part": "snippet,contentDetails", "id": ids[0]}).get("items", [])
+    if not items:
+        return None
+    c = items[0]
+    return {
+        "id": c["id"],
+        "titulo": c.get("snippet", {}).get("title", nombre),
+        "uploads": c.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", ""),
+    }
+
+
+def resolver_canal(nombre, handle=""):
+    try:
+        return _resolver_canal(nombre, handle)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def videos_de_canal(nombre, handle, busqueda, periodo, n=2):
+    """Videos de un canal sobre el tema, dentro del período (los más recientes primero)."""
+    canal = resolver_canal(nombre, handle)
+    if not canal:
+        return None
+    desde, hasta = rango_fechas(periodo)
+    videos = []
+    reciente = not isinstance(periodo, (tuple, list)) and int(periodo) <= 30
+    if reciente and canal["uploads"]:
+        # Períodos cortos: se revisan los últimos 50 videos del canal (muy barato en cuota).
+        datos = yt_get("playlistItems", {"part": "snippet", "playlistId": canal["uploads"], "maxResults": 50})
+        for item in datos.get("items", []):
+            sn = item.get("snippet", {})
+            fecha = (sn.get("publishedAt") or "")[:10]
+            video_id = sn.get("resourceId", {}).get("videoId")
+            if not video_id or not (desde.isoformat() <= fecha < hasta.isoformat()):
+                continue
+            if coincide(sn.get("title", "") + " " + sn.get("description", ""), busqueda):
+                videos.append(
+                    {"titulo": html.unescape(sn.get("title", "")), "url": f"https://www.youtube.com/watch?v={video_id}", "fecha": fecha}
+                )
+    else:
+        # Períodos largos: búsqueda dentro del canal, ordenada por fecha (no por "relevancia").
+        datos = yt_get(
+            "search",
+            {
+                "part": "snippet",
+                "channelId": canal["id"],
+                "q": busqueda,
+                "type": "video",
+                "order": "date",
+                "maxResults": n,
+                "publishedAfter": f"{desde.isoformat()}T00:00:00Z",
+                "publishedBefore": f"{hasta.isoformat()}T00:00:00Z",
+            },
+        )
+        for item in datos.get("items", []):
+            sn = item.get("snippet", {})
+            video_id = item.get("id", {}).get("videoId")
+            if video_id:
+                videos.append(
+                    {"titulo": html.unescape(sn.get("title", "")), "url": f"https://www.youtube.com/watch?v={video_id}", "fecha": (sn.get("publishedAt") or "")[:10]}
+                )
+    videos.sort(key=lambda v: v["fecha"], reverse=True)
+    return {"canal": canal["titulo"], "videos": videos[:n]}
+
+
+# ---------------------------------------------------- podcasts por programa y tendencia
+@st.cache_data(ttl=UNA_SEMANA, show_spinner=False)
+def _resolver_podcast(nombre, pais="CL"):
+    """Encuentra el programa en Apple Podcasts por su nombre."""
+    params = {"term": nombre, "media": "podcast", "entity": "podcast", "country": pais, "limit": 1}
+    datos = leer_json_web("https://itunes.apple.com/search?" + urllib.parse.urlencode(params))
+    if not datos:
+        raise ConnectionError("Apple Podcasts no respondió")  # no se guarda en caché; se reintenta luego
+    for x in datos.get("results", []):
+        if x.get("collectionId"):
+            return {"id": x["collectionId"], "titulo": x.get("collectionName", nombre)}
+    return None
+
+
+def resolver_podcast(nombre, pais="CL"):
+    try:
+        return _resolver_podcast(nombre, pais)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def episodios_de_podcast(podcast_id, pais="CL"):
+    """Los últimos episodios del programa (hasta 200)."""
+    params = {"id": podcast_id, "entity": "podcastEpisode", "limit": 200, "country": pais}
+    datos = leer_json_web("https://itunes.apple.com/lookup?" + urllib.parse.urlencode(params))
+    return [
+        {
+            "titulo": x.get("trackName", ""),
+            "descripcion": x.get("description", "") or x.get("shortDescription", ""),
+            "link": x.get("trackViewUrl", ""),
+            "fecha": (x.get("releaseDate") or "")[:10],
+        }
+        for x in datos.get("results", [])
+        if x.get("wrapperType") == "podcastEpisode" or x.get("kind") == "podcast-episode"
+    ]
+
+
+def podcasts_por_tendencia(busqueda, idioma, periodo, n=2):
+    desde, hasta = rango_fechas(periodo)
+    grupos = {}
+    for p in PODCASTS:
+        if p.get("idioma", "es") != idioma:
+            continue
+        programa = resolver_podcast(p["nombre"], p.get("pais", "CL"))
+        episodios = []
+        if programa:
+            for e in episodios_de_podcast(programa["id"], p.get("pais", "CL")):
+                if not e["fecha"] or not (desde.isoformat() <= e["fecha"] < hasta.isoformat()):
+                    continue
+                if coincide(e["titulo"] + " " + e["descripcion"], busqueda):
+                    episodios.append(e)
+        episodios.sort(key=lambda e: e["fecha"], reverse=True)
+        grupos.setdefault(p["tendencia"], []).append(
+            {"nombre": p["nombre"], "programa": programa["titulo"] if programa else None, "episodios": episodios[:n]}
+        )
+    return grupos
+
+
+def videos_por_tendencia(busqueda, idioma, periodo):
+    grupos = {}
+    for c in CANALES_VIDEO:
+        if c.get("idioma", "es") != idioma:
+            continue
+        resultado = videos_de_canal(c["nombre"], c.get("handle", ""), busqueda, periodo)
+        grupos.setdefault(c["tendencia"], []).append({"nombre": c["nombre"], "resultado": resultado})
+    return grupos
 
 
 @st.cache_data(ttl=TRES_HORAS, show_spinner=False)
@@ -764,33 +946,65 @@ def mostrar_extras(tema, noticias, analisis, clave_ui, periodo=7):
 
 
 def bloque_multimedia(busqueda, pais="CL", idioma="es", region="CL", periodo=7):
-    """Podcasts y videos sobre una búsqueda, en un idioma."""
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**🎧 Episodios de podcast**")
+    """Podcasts (dentro del período) y videos de canales elegidos, ordenados por tendencia."""
+    st.markdown(f"**🎧 Podcasts de programas seleccionados, por tendencia** · {texto_periodo(periodo)}")
+    with st.spinner("Revisando los episodios de cada programa..."):
+        grupos_pod = podcasts_por_tendencia(busqueda, idioma, periodo)
+    orden_pod = [t for t in ORDEN + ["especializada", "internacional"] if t in grupos_pod]
+    if orden_pod:
+        for col, tendencia in zip(st.columns(len(orden_pod)), orden_pod):
+            with col:
+                st.markdown(f"**{ETIQUETAS.get(tendencia, tendencia)}**")
+                hubo = False
+                for prog in grupos_pod[tendencia]:
+                    for e in prog["episodios"]:
+                        hubo = True
+                        st.markdown(f"- [{seguro(e['titulo'])}]({e['link']}) — *{seguro(prog['programa'])}*, {e['fecha']}")
+                if not hubo:
+                    st.caption("Sin episodios sobre el tema en este período.")
+                st.caption("Programas: " + ", ".join(p["nombre"] for p in grupos_pod[tendencia]))
+
+    with st.expander("Otros episodios encontrados (cualquier programa)"):
         with st.spinner("Buscando podcasts..."):
-            episodios = buscar_podcasts(busqueda, pais=pais)
+            episodios = buscar_podcasts(busqueda, pais=pais, periodo=periodo)
         if not episodios:
-            st.markdown("_No encontré episodios sobre este tema._")
+            st.markdown("_No encontré otros episodios sobre este tema en este período._")
         for e in episodios:
             st.markdown(f"- [{seguro(e['titulo'])}]({e['link']}) — *{seguro(e['programa'])}*, {e['fecha']}")
-        st.link_button(
-            "Buscar en Spotify",
-            "https://open.spotify.com/search/" + urllib.parse.quote(busqueda) + "/episodes",
+        st.caption("Encontrados automáticamente: no están clasificados por tendencia.")
+    st.link_button(
+        "Buscar en Spotify",
+        "https://open.spotify.com/search/" + urllib.parse.quote(busqueda) + "/episodes",
+    )
+
+    st.markdown(f"**🎥 Videos de canales seleccionados, por tendencia** · {texto_periodo(periodo)}")
+    if not secreto("YOUTUBE_API_KEY"):
+        st.caption(
+            "Para ver aquí los videos de cada canal, ordenados por tendencia, falta la clave gratuita "
+            "de YouTube (YOUTUBE_API_KEY en los Secrets)."
         )
-    with c2:
-        st.markdown("**🎥 Videos**")
-        videos = buscar_videos(busqueda, idioma=idioma, region=region, periodo=periodo)
-        if videos:
-            for v in videos:
-                st.video(v["url"])
-                st.caption(f"{seguro(v['titulo'])} — {seguro(v['canal'])}")
-        elif videos is not None:
-            st.markdown("_No encontré videos recientes sobre este tema._")
-        st.link_button(
-            "Buscar en YouTube",
-            "https://www.youtube.com/results?" + urllib.parse.urlencode({"search_query": busqueda}),
-        )
+    else:
+        with st.spinner("Buscando videos en los canales seleccionados..."):
+            grupos = videos_por_tendencia(busqueda, idioma, periodo)
+        orden = [t for t in ORDEN + ["especializada", "internacional"] if t in grupos]
+        if orden:
+            for col, tendencia in zip(st.columns(len(orden)), orden):
+                with col:
+                    st.markdown(f"**{ETIQUETAS.get(tendencia, tendencia)}**")
+                    hubo = False
+                    for canal in grupos[tendencia]:
+                        r = canal["resultado"]
+                        for v in (r or {}).get("videos", []):
+                            hubo = True
+                            st.video(v["url"])
+                            st.caption(f"{seguro(v['titulo'])} — {seguro(r['canal'])}, {v['fecha']}")
+                    if not hubo:
+                        st.caption("Sin videos sobre el tema en este período.")
+                    st.caption("Canales: " + ", ".join(c["nombre"] for c in grupos[tendencia]))
+    st.link_button(
+        "Buscar en YouTube",
+        "https://www.youtube.com/results?" + urllib.parse.urlencode({"search_query": busqueda}),
+    )
 
 
 def mostrar_geopolitica(nombre, grupos, analisis):
@@ -995,6 +1209,26 @@ with st.sidebar:
     n_temas = st.slider("Temas a analizar", 2, 8, 4)
     if st.button("🔄 Traer noticias nuevas"):
         st.cache_data.clear()
+    with st.expander("Podcasts y su tendencia"):
+        verificar_pod = st.checkbox("Ver qué programa encontró la app para cada nombre", key="ver_pod")
+        for p in PODCASTS:
+            encontrado = ""
+            if verificar_pod:
+                r = resolver_podcast(p["nombre"], p.get("pais", "CL"))
+                encontrado = f" → {r['titulo']}" if r else " → ⚠️ no encontrado"
+            st.write(f"{ETIQUETAS.get(p['tendencia'], p['tendencia'])} — {p['nombre']}{encontrado}")
+        st.caption("Clasificación inicial, editable en fuentes.py.")
+    with st.expander("Canales de video y su tendencia"):
+        verificar_yt = secreto("YOUTUBE_API_KEY") and st.checkbox(
+            "Ver qué canal encontró la app para cada nombre", key="ver_yt"
+        )
+        for c in CANALES_VIDEO:
+            encontrado = ""
+            if verificar_yt:
+                r = resolver_canal(c["nombre"], c.get("handle", ""))
+                encontrado = f" → {r['titulo']}" if r else " → ⚠️ no encontrado"
+            st.write(f"{ETIQUETAS.get(c['tendencia'], c['tendencia'])} — {c['nombre']}{encontrado}")
+        st.caption("Clasificación inicial, editable en fuentes.py.")
     with st.expander("Medios revisados y su tendencia"):
         for m in MEDIOS:
             st.write(f"{ETIQUETAS[m['tendencia']]} — {m['nombre']}")

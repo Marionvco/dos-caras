@@ -54,6 +54,70 @@ INDICADORES = {
 }
 
 
+# Canales de YouTube por tendencia (clasificación INICIAL: revísala y ajústala).
+# La app busca cada canal por su nombre. Si encuentra uno equivocado, agrega su "handle"
+# (lo que aparece en la dirección del canal, por ejemplo "@T13") y lo usará directamente.
+# En "Medios revisados" (barra lateral) puedes ver qué canal encontró para cada nombre.
+CANALES_VIDEO = [
+    # Derecha / centroderecha
+    {"nombre": "El Líbero", "tendencia": "derecha", "idioma": "es"},
+    {"nombre": "Ex-Ante", "tendencia": "derecha", "idioma": "es"},
+    {"nombre": "La Tercera", "tendencia": "derecha", "idioma": "es"},
+    # Centro / generalistas
+    {"nombre": "T13", "tendencia": "centro", "idioma": "es"},
+    {"nombre": "24 Horas TVN", "tendencia": "centro", "idioma": "es"},
+    {"nombre": "CNN Chile", "tendencia": "centro", "idioma": "es"},
+    {"nombre": "BioBioChile", "tendencia": "centro", "idioma": "es"},
+    # Izquierda / centroizquierda
+    {"nombre": "The Clinic", "tendencia": "izquierda", "idioma": "es"},
+    {"nombre": "El Mostrador", "tendencia": "izquierda", "idioma": "es"},
+    {"nombre": "Radio Universidad de Chile", "tendencia": "izquierda", "idioma": "es"},
+    {"nombre": "CIPER Chile", "tendencia": "izquierda", "idioma": "es"},
+    # Prensa económica
+    {"nombre": "Diario Financiero", "tendencia": "especializada", "idioma": "es"},
+    {"nombre": "Bloomberg Línea", "tendencia": "especializada", "idioma": "es"},
+    # Internacionales en español
+    {"nombre": "BBC News Mundo", "tendencia": "internacional", "idioma": "es"},
+    {"nombre": "DW Español", "tendencia": "internacional", "idioma": "es"},
+    {"nombre": "CNN en Español", "tendencia": "internacional", "idioma": "es"},
+    # Internacionales en inglés (para Geopolítica)
+    {"nombre": "Reuters", "tendencia": "internacional", "idioma": "en"},
+    {"nombre": "Associated Press", "tendencia": "internacional", "idioma": "en"},
+    {"nombre": "BBC News", "tendencia": "internacional", "idioma": "en"},
+    {"nombre": "Al Jazeera English", "tendencia": "internacional", "idioma": "en"},
+]
+
+
+# Podcasts por tendencia (clasificación INICIAL: revísala y ajústala).
+# La app busca cada programa por su nombre en Apple Podcasts. En "Podcasts y su tendencia"
+# (barra lateral) puedes ver qué programa encontró. Si no es el correcto, cambia el nombre
+# por el título exacto del programa, tal como aparece en Apple Podcasts o Spotify.
+PODCASTS = [
+    # Derecha / centroderecha
+    {"nombre": "La Tercera", "tendencia": "derecha", "pais": "CL", "idioma": "es"},
+    {"nombre": "Ex-Ante", "tendencia": "derecha", "pais": "CL", "idioma": "es"},
+    {"nombre": "El Líbero", "tendencia": "derecha", "pais": "CL", "idioma": "es"},
+    # Centro / generalistas
+    {"nombre": "Cooperativa", "tendencia": "centro", "pais": "CL", "idioma": "es"},
+    {"nombre": "BioBioChile", "tendencia": "centro", "pais": "CL", "idioma": "es"},
+    {"nombre": "CNN Chile", "tendencia": "centro", "pais": "CL", "idioma": "es"},
+    # Izquierda / centroizquierda
+    {"nombre": "The Clinic", "tendencia": "izquierda", "pais": "CL", "idioma": "es"},
+    {"nombre": "Radio Universidad de Chile", "tendencia": "izquierda", "pais": "CL", "idioma": "es"},
+    {"nombre": "CIPER", "tendencia": "izquierda", "pais": "CL", "idioma": "es"},
+    # Prensa económica
+    {"nombre": "Diario Financiero", "tendencia": "especializada", "pais": "CL", "idioma": "es"},
+    {"nombre": "Bloomberg Línea", "tendencia": "especializada", "pais": "CL", "idioma": "es"},
+    # Internacionales en español
+    {"nombre": "BBC Mundo", "tendencia": "internacional", "pais": "CL", "idioma": "es"},
+    {"nombre": "Hoy en EL PAÍS", "tendencia": "internacional", "pais": "CL", "idioma": "es"},
+    # Internacionales en inglés (para Geopolítica)
+    {"nombre": "Global News Podcast", "tendencia": "internacional", "pais": "US", "idioma": "en"},
+    {"nombre": "Reuters World News", "tendencia": "internacional", "pais": "US", "idioma": "en"},
+    {"nombre": "The Intelligence from The Economist", "tendencia": "internacional", "pais": "US", "idioma": "en"},
+]
+
+
 # Medios internacionales en español: se usan para ver cómo se cuenta un tema chileno desde fuera.
 MEDIOS_INTERNACIONALES = [
     {"nombre": "BBC Mundo", "dominio": "bbc.com"},
