@@ -231,7 +231,13 @@ def entrada_a_noticia(entrada, medio=None, idioma=None):
         "titulo": limpiar_titulo(entrada.get("title", "")),
         "link": entrada.get("link", ""),
         "idioma": idioma,
+        "fecha": fecha_de(entrada),
     }
+
+
+def fecha_de(entrada):
+    p = entrada.get("published_parsed")
+    return datetime.date(p.tm_year, p.tm_mon, p.tm_mday).isoformat() if p else ""
 
 
 def idioma_de(hl):
@@ -544,6 +550,70 @@ Responde SOLO con JSON con esta forma:
     return llamar_ia(prompt, 3500)
 
 
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def traer_historial(nombre, tema, anios, por_anio=5):
+    """Busca año por año, hacia atrás, titulares que mencionan a la persona y el tema."""
+    hoy = datetime.date.today()
+    noticias, vistos = [], set()
+    for k in range(anios):
+        hasta = hoy - datetime.timedelta(days=365 * k) + datetime.timedelta(days=1)
+        desde = hoy - datetime.timedelta(days=365 * (k + 1))
+        consulta = f'"{nombre}" {tema} after:{desde.isoformat()} before:{hasta.isoformat()}'
+        feed = feedparser.parse(url_google_news(consulta), agent=AGENTE)
+        for entrada in feed.entries[:por_anio]:
+            n = entrada_a_noticia(entrada)
+            if not n["titulo"] or n["titulo"] in vistos:
+                continue
+            vistos.add(n["titulo"])
+            noticias.append(n)
+    noticias.sort(key=lambda x: x["fecha"])  # de la más antigua a la más reciente
+    for i, n in enumerate(noticias):
+        n["id"] = i
+    return noticias
+
+
+@st.cache_data(ttl=TRES_HORAS, show_spinner=False)
+def analizar_coherencia(nombre, tema, noticias):
+    lista = "\n".join(f"{n['id']} | {n['fecha']} | {n['medio']} | {n['titulo']}" for n in noticias)
+    prompt = f"""Eres un verificador de datos (fact-checker) riguroso, neutral y cuidadoso con la reputación
+de las personas. Analiza la COHERENCIA de los dichos públicos de "{nombre}" sobre el tema "{tema}",
+a lo largo del tiempo, usando SOLO estos titulares (formato: id | fecha | medio | titular):
+
+{lista}
+
+Reglas estrictas:
+- Cuenta SOLO lo que los titulares atribuyen directamente a {nombre} (sus declaraciones, votos o decisiones).
+  Lo que otros dicen de esa persona NO es su postura.
+- Si un titular es ambiguo o no deja clara la postura, no lo uses para concluir nada.
+- Distingue con cuidado:
+  * "Cambio de postura": la persona cambió de opinión, y es legítimo (nuevos datos, otro cargo, otro
+    contexto). Si los titulares muestran que lo explicó, dilo.
+  * "Posible contradicción": dos dichos que parecen incompatibles, sin explicación visible en los titulares.
+    SIEMPRE requiere verificación: un titular no muestra todo el contexto.
+- Una "posible contradicción" necesita AL MENOS dos titulares distintos, con fechas distintas.
+- No uses adjetivos ofensivos ni juicios morales. No digas que alguien mintió.
+- Aplica exactamente el mismo criterio a cualquier persona, de cualquier sector político.
+- Si hay pocos datos, dilo: la conclusión correcta puede ser "no hay información suficiente".
+
+Responde SOLO con JSON con esta forma:
+{{
+  "veredicto": "Coherente | Cambio de postura | Posible contradicción | Información insuficiente",
+  "resumen": "2 o 3 frases neutrales explicando el veredicto",
+  "postura_actual": "qué dice hoy, según los titulares más recientes (o 'No hay titulares recientes')",
+  "linea_tiempo": [{{"periodo": "año o rango", "postura": "qué decía en ese momento", "ids": [0, 3]}}],
+  "cambios": [
+    {{"tipo": "Cambio de postura | Posible contradicción",
+      "antes_id": 2, "ahora_id": 9,
+      "antes": "qué dijo antes", "ahora": "qué dijo después",
+      "area": "Política | Economía | Efectos sociales",
+      "contexto": "explicación o cambio de contexto visible en los titulares, o 'No se ve explicación en los titulares'",
+      "respaldo": "Claro en los titulares | Requiere verificación"}}
+  ],
+  "que_verificar": ["qué habría que revisar en las fuentes completas para confirmar"]
+}}"""
+    return llamar_ia(prompt, 4000)
+
+
 def todos_los_actores():
     return list(ACTORES) + [c for c in PAISES if c not in ACTORES]
 
@@ -783,6 +853,58 @@ def mostrar_multimedia_geo(conflicto, clave_ui, periodo=7):
         bloque_multimedia(conflicto["busqueda_en"], pais="US", idioma="en", region="US", periodo=periodo)
 
 
+def mostrar_coherencia(nombre, tema, noticias, analisis, anios):
+    por_id = {n["id"]: n for n in noticias}
+
+    def enlace(i):
+        n = por_id.get(i)
+        if not n:
+            return "_(sin fuente)_"
+        return f"[{seguro(n['titulo'])}]({n['link']}) — *{seguro(n['medio'])}*, {n['fecha']}"
+
+    veredicto = analisis.get("veredicto", "")
+    st.subheader(f"{seguro(nombre)} sobre «{seguro(tema)}»")
+    st.info(f"**Resultado: {seguro(veredicto)}**\n\n{seguro(analisis.get('resumen', ''))}")
+    st.markdown(f"**Lo que dice hoy:** {seguro(analisis.get('postura_actual', ''))}")
+
+    cambios = analisis.get("cambios", []) or []
+    if cambios:
+        st.markdown("### 🔁 Lo que dijo antes y lo que dice ahora")
+        for c in cambios:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{seguro(c.get('tipo', ''))}** · {seguro(c.get('area', ''))} · "
+                    f"_Respaldo: {seguro(c.get('respaldo', ''))}_"
+                )
+                a1, a2 = st.columns(2)
+                with a1:
+                    st.markdown(f"**Antes:** {seguro(c.get('antes', ''))}")
+                    st.markdown(enlace(c.get("antes_id")))
+                with a2:
+                    st.markdown(f"**Ahora:** {seguro(c.get('ahora', ''))}")
+                    st.markdown(enlace(c.get("ahora_id")))
+                st.caption(f"Contexto: {seguro(c.get('contexto', ''))}")
+    else:
+        st.markdown("_No se detectaron cambios de postura en los titulares encontrados._")
+
+    linea = analisis.get("linea_tiempo", []) or []
+    if linea:
+        st.markdown("### 🗓️ Línea de tiempo")
+        for etapa in linea:
+            st.markdown(f"**{seguro(etapa.get('periodo', ''))}:** {seguro(etapa.get('postura', ''))}")
+            for i in etapa.get("ids", [])[:3]:
+                st.markdown(f"  - {enlace(i)}")
+
+    lista_puntos("🔎 Qué habría que verificar", analisis.get("que_verificar", []))
+
+    with st.expander(f"Todos los titulares encontrados ({len(noticias)}, últimos {anios} años)"):
+        for n in reversed(noticias):
+            st.markdown(f"- {n['fecha']} · [{seguro(n['titulo'])}]({n['link']}) — *{seguro(n['medio'])}*")
+
+    if st.toggle("🎧 Podcasts y 🎥 videos sobre esta persona y el tema", key=f"coh_{nombre}_{tema}"):
+        bloque_multimedia(f"{nombre} {tema}", periodo=365 * anios)
+
+
 def mostrar_analisis(tema, noticias, analisis, clave_ui="0", periodo=7):
     st.subheader(seguro(tema))
     st.write(seguro(analisis.get("resumen_neutral", "")))
@@ -951,8 +1073,8 @@ def buscar_en_mundo(texto, rango_busqueda):
     ejecutar_geo(tema, rango_busqueda, "mundo_" + texto, min_actores=0)
 
 
-tab_hoy, tab_eco, tab_buscar, tab_geo = st.tabs(
-    ["📰 Temas del día", "💰 Economía", "🔍 Buscar una noticia", "🌐 Geopolítica"]
+tab_hoy, tab_eco, tab_buscar, tab_geo, tab_dichos = st.tabs(
+    ["📰 Temas del día", "💰 Economía", "🔍 Buscar una noticia", "🌐 Geopolítica", "🗣️ Dichos y hechos"]
 )
 
 with tab_hoy:
@@ -1118,6 +1240,46 @@ with tab_geo:
                 conflicto = next(c for c in CONFLICTOS if c["nombre"] == elegido_g)
             if conflicto is not None:
                 ejecutar_geo(conflicto, dias_g, "geo_" + conflicto["nombre"])
+        except Exception as e:
+            st.error(f"Algo falló: {e}")
+
+with tab_dichos:
+    st.markdown("#### Lo que dicen hoy y lo que dijeron antes")
+    st.write(
+        "Revisa la coherencia de los dichos públicos de autoridades y figuras públicas, de cualquier "
+        "sector, a lo largo de los años: en lo político, lo económico y sus efectos sociales."
+    )
+    st.caption(
+        "Esta sección no acusa a nadie: muestra la evidencia con fecha y fuente para que tú la juzgues. "
+        "Cambiar de opinión puede ser legítimo. Un titular nunca muestra todo el contexto."
+    )
+    d1, d2 = st.columns(2)
+    with d1:
+        nombre_aut = st.text_input("Nombre de la autoridad o figura pública", placeholder="Ej: nombre y apellido")
+    with d2:
+        tema_aut = st.text_input("Tema", placeholder="Ej: pensiones, royalty minero, seguridad")
+    anios_aut = st.slider("Años hacia atrás", 1, 15, 10)
+    if st.button("Revisar coherencia", type="primary") and nombre_aut.strip() and tema_aut.strip():
+        st.session_state["dichos"] = (nombre_aut.strip(), tema_aut.strip(), anios_aut)
+    if st.session_state.get("dichos"):
+        nombre_d, tema_d, anios_d = st.session_state["dichos"]
+        try:
+            with st.spinner(f"Buscando año por año, {anios_d} años hacia atrás..."):
+                historial = traer_historial(nombre_d, tema_d, anios_d)
+            if len(historial) < 2:
+                st.warning(
+                    "Encontré muy pocos titulares para comparar. Prueba con el nombre completo, "
+                    "un tema más general o más años."
+                )
+            else:
+                años_con_datos = sorted({n["fecha"][:4] for n in historial if n["fecha"]})
+                st.caption(
+                    f"{len(historial)} titulares encontrados, de {len(años_con_datos)} años distintos "
+                    f"({años_con_datos[0]} a {años_con_datos[-1]})."
+                )
+                with st.spinner("La IA está comparando los dichos en el tiempo..."):
+                    analisis_d = analizar_coherencia(nombre_d, tema_d, historial)
+                mostrar_coherencia(nombre_d, tema_d, historial, analisis_d, anios_d)
         except Exception as e:
             st.error(f"Algo falló: {e}")
 
